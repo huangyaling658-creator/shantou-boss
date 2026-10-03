@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>闪投</title>
+  <link rel="stylesheet" href="panel.css">
+</head>
+<body>
+
+<header class="topbar">
+  <button id="btn-back" class="icon-btn arrow" title="返回" hidden aria-label="返回">
+    <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"></polyline></svg>
+  </button>
+  <h1>闪投</h1>
+  <button id="btn-service" class="icon-btn" title="客服小助手" aria-label="客服">
+    <svg viewBox="0 0 24 24" width="21" height="21" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 14v-2a8 8 0 0 1 16 0v2"></path><rect x="2" y="13" width="4" height="6" rx="1.5"></rect><rect x="18" y="13" width="4" height="6" rx="1.5"></rect><path d="M20 19a4 4 0 0 1-4 3h-2"></path></svg>
+  </button>
+  <button id="btn-settings" class="icon-btn" title="设置" aria-label="设置">
+    <svg viewBox="0 0 24 24" width="21" height="21" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+  </button>
+</header>
+
+<!-- 客服小助手（半屏抽屉） -->
+<div class="drawer-mask" id="service-mask" hidden></div>
+<div class="drawer" id="service-drawer" hidden>
+  <div class="drawer-head">
+    <span>客服小助手</span>
+    <button id="service-close" class="icon-btn" aria-label="关闭">✕</button>
+  </div>
+  <div class="drawer-body">
+    <p class="svc-hi">你好，我是闪投小助手 👋</p>
+    <p class="svc-tip">用闪投遇到问题，可以看看下面这些，或者直接联系我们。</p>
+    <div class="svc-faq">
+      <details><summary>搜不到岗位 / 数量太少</summary><p>先确认已登录 BOSS。岗位词尽量用 BOSS 下拉里的标准词，多选几个城市能显著增加数量。</p></details>
+      <details><summary>招呼语生成慢</summary><p>会并发生成，通常一分钟内完成。若卡住，多半是网络或模型接口波动，稍等或重试。</p></details>
+      <details><summary>投递显示失败</summary><p>失败会标明原因（如没找到输入框）。可在投递完成页对失败的岗位一键重投。</p></details>
+    </div>
+    <a class="svc-contact" href="mailto:benyi2abiding@gmail.com">联系人工客服</a>
+  </div>
+</div>
+
+<!-- ══════════════ 条件设置 ══════════════ -->
+<div class="screen on" id="screen-config">
+
+  <!-- 有上次/进行中的搜索结果时，提供返回入口（返回不丢答案）-->
+  <div id="resume-bar" class="resume-bar" hidden></div>
+
+  <section class="sec">
+    <h2>投递模式</h2>
+    <div class="pills mode-pills" id="search-mode">
+      <span class="pill" data-mode="position">海投</span>
+      <span class="pill" data-mode="company">精投</span>
+    </div>
+  </section>
+
+  <section class="sec">
+    <h2>图片版简历</h2>
+    <div class="uploads" id="uploads"></div>
+    <input type="file" id="file-input" accept="image/*" multiple hidden>
+  </section>
+
+  <section class="sec" id="sec-city">
+    <h2>目标城市</h2>
+    <div class="search">
+      <input type="text" id="city-search" placeholder="搜索城市…">
+      <span class="clear" data-clear="city-search">×</span>
+    </div>
+    <div class="pills" id="city-quick"></div>
+    <button class="link-more" id="btn-city-more">展开更多</button>
+    <div class="picked-wrap" id="city-picked" hidden>
+      <div class="picked-label">已选城市</div>
+      <div class="chips" id="city-selected"></div>
+    </div>
+  </section>
+
+  <section class="sec" id="sec-position">
+    <h2>期望职位</h2>
+    <div class="search">
+      <input type="text" id="position-search" placeholder="搜索岗位…">
+      <span class="clear" data-clear="position-search">×</span>
+    </div>
+    <div id="position-result"></div>
+    <div class="picked-wrap" id="position-picked" hidden>
+      <div class="picked-label">已选岗位</div>
+      <div class="chips" id="position-selected"></div>
+    </div>
+  </section>
+
+  <section class="sec" id="sec-company">
+    <h2>目标公司</h2>
+    <div class="search">
+      <input type="text" id="company-search" placeholder="搜索公司…">
+      <span class="clear" data-clear="company-search">×</span>
+    </div>
+    <div id="company-groups"></div>
+    <div class="picked-wrap" id="company-picked" hidden>
+      <div class="picked-label">已选公司</div>
+      <div class="chips" id="company-selected"></div>
+    </div>
+  </section>
+
+  <div id="filter-area"></div>
+
+  <section class="sec">
+    <div class="tips">
+      <div class="tip"><i>1</i><span>在浏览器打开 BOSS 直聘页面</span></div>
+      <div class="tip"><i>2</i><span>确保<b>已登录</b>你的 BOSS 账号</span></div>
+      <div class="tip"><i>3</i><span>为避免招呼语生成过久，请确保<b>关闭</b> VPN</span></div>
+    </div>
+  </section>
+
+</div>
+
+<!-- ══════════════ 搜索与结果 ══════════════ -->
+<div class="screen" id="screen-result">
+  <div class="progress" id="search-progress" hidden>
+    <div class="progress-phase" id="search-phase"></div>
+    <div class="progress-bar"><div class="progress-fill" id="search-fill"></div></div>
+    <div class="progress-detail" id="search-detail"></div>
+  </div>
+  <!-- 投递中：原地在岗位列表上方显示进度，不切走页面（对齐即投）-->
+  <div class="progress" id="send-banner" hidden>
+    <div class="progress-bar"><div class="progress-fill" id="sendbar-fill"></div></div>
+    <div class="progress-phase" id="sendbar-phase"></div>
+  </div>
+  <div id="funnel" class="funnel" hidden></div>
+
+  <div id="result-body" hidden>
+    <!-- 图片简历 -->
+    <section class="sec">
+      <h2>图片版简历</h2>
+      <div class="uploads" id="uploads-2"></div>
+    </section>
+
+    <!-- 招呼语：AI定制 / 自定义 -->
+    <section class="sec">
+      <h2>招呼语</h2>
+      <div class="pills" id="greet-mode">
+        <span class="pill" data-mode="ai">AI 定制</span>
+        <span class="pill" data-mode="custom">自定义</span>
+      </div>
+      <textarea id="global-greet" rows="4" hidden
+        placeholder="所有岗位统一发这条招呼语，单个岗位可在下面单独改。"></textarea>
+    </section>
+
+    <!-- 结果页精筛：按岗位词子词(或门)在收到的结果里再筛一道 -->
+    <section class="sec" id="refine-sec" hidden>
+      <h2 class="jobs-head">精筛 <span class="h-note">点亮的词，岗位名含任一个就留（都不点＝不显示）</span></h2>
+      <div class="pills" id="refine-chips"></div>
+      <div class="search" style="margin-top:10px">
+        <input type="text" id="refine-add" placeholder="加一个词，回车…">
+      </div>
+    </section>
+
+    <!-- 岗位 -->
+    <section class="sec">
+      <h2 class="jobs-head">岗位 <span id="jobs-count" class="h-note"></span>
+        <label class="selall"><input type="checkbox" id="sel-all" checked></label>
+      </h2>
+      <div id="job-list"></div>
+    </section>
+  </div>
+
+  <div class="empty" id="search-empty" hidden></div>
+</div>
+
+<!-- ══════════════ 打招呼语 ══════════════ -->
+<div class="screen" id="screen-greeting">
+  <div class="progress" id="greet-progress" hidden>
+    <div class="progress-phase" id="greet-phase"></div>
+    <div class="progress-bar"><div class="progress-fill" id="greet-fill"></div></div>
+    <div class="progress-detail" id="greet-detail"></div>
+  </div>
+  <div id="greet-list"></div>
+</div>
+
+<!-- ══════════════ 投递 ══════════════ -->
+<div class="screen" id="screen-send">
+  <div class="progress" id="send-progress">
+    <div class="progress-phase" id="send-phase"></div>
+    <div class="progress-bar"><div class="progress-fill" id="send-fill"></div></div>
+    <div class="progress-detail" id="send-detail"></div>
+  </div>
+  <div id="send-log" class="send-log"></div>
+  <div id="send-actions" class="sec" hidden>
+    <button id="btn-reinvest" class="btn ghost" style="width:100%">重投失败的岗位</button>
+  </div>
+</div>
+
+<footer class="actionbar">
+  <div class="action-row">
+    <span id="action-count" class="action-count" hidden></span>
+    <button id="btn-reset" class="btn ghost">重置</button>
+    <button id="btn-action" class="btn primary">开始搜索</button>
+    <span id="eta-hint" class="eta-hint" hidden></span>
+  </div>
+</footer>
+
+<div id="toast" class="toast" hidden></div>
+
+<script src="../shared/constants.js"></script>
+<script src="../shared/utils.js"></script>
+<script src="../data/companies.js"></script>
+<script src="../data/positions.js"></script>
+<script src="../data/position-tree.js"></script>
+<script src="../data/industries.js"></script>
+<script src="panel.js"></script>
+</body>
+</html>

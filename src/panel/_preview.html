@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>闪投 · 本地预览</title>
+  <link rel="stylesheet" href="panel.css">
+</head>
+<body>
+
+<header class="topbar">
+  <h1>闪投</h1>
+  <button id="btn-back" class="icon-btn" title="返回条件设置" hidden>‹ 条件</button>
+  <button id="btn-menu" class="icon-btn" title="更多">⋯</button>
+</header>
+
+<div class="menu" id="menu" hidden>
+  <button data-act="reload-dict">重新读取 BOSS 筛选项</button>
+  <button data-act="export">导出全部数据</button>
+</div>
+
+<!-- ══════════════ 条件设置 ══════════════ -->
+<div class="screen on" id="screen-config">
+
+  <section class="sec">
+    <h2>图片版简历</h2>
+    <div class="uploads" id="uploads"></div>
+    <input type="file" id="file-input" accept="image/*" multiple hidden>
+    <div class="ocr-row" id="ocr-row" hidden>
+      <span id="ocr-status"></span>
+      <button class="link" id="btn-toggle-text">查看识别文字</button>
+    </div>
+    <textarea id="resume-text" rows="8" hidden></textarea>
+  </section>
+
+  <section class="sec">
+    <h2>目标公司 <span class="h-note">只投这些公司</span></h2>
+    <div class="search">
+      <input type="text" id="company-search" placeholder="搜索公司…">
+      <span class="clear" data-clear="company-search">×</span>
+    </div>
+    <div id="company-groups"></div>
+    <div class="picked-wrap" id="company-picked" hidden>
+      <div class="picked-label">已选公司</div>
+      <div class="chips" id="company-selected"></div>
+    </div>
+    <div class="note">不选公司也能搜，那就是按岗位词全网搜索。</div>
+  </section>
+
+  <section class="sec">
+    <h2>目标城市</h2>
+    <div class="search">
+      <input type="text" id="city-search" placeholder="搜索城市…">
+      <span class="clear" data-clear="city-search">×</span>
+    </div>
+    <div class="pills" id="city-quick"></div>
+    <button class="link-more" id="btn-city-more">展开更多</button>
+    <div class="picked-wrap" id="city-picked" hidden>
+      <div class="picked-label">已选城市</div>
+      <div class="chips" id="city-selected"></div>
+    </div>
+  </section>
+
+  <section class="sec">
+    <h2>期望职位</h2>
+    <div class="search">
+      <input type="text" id="position-search" placeholder="搜索岗位…">
+      <span class="clear" data-clear="position-search">×</span>
+    </div>
+    <div id="position-result"></div>
+    <div class="picked-wrap" id="position-picked" hidden>
+      <div class="picked-label">已选岗位</div>
+      <div class="chips" id="position-selected"></div>
+    </div>
+  </section>
+
+  <div id="filter-area"></div>
+
+</div>
+
+<!-- ══════════════ 搜索与结果 ══════════════ -->
+<div class="screen" id="screen-result">
+  <div class="progress" id="search-progress" hidden>
+    <div class="progress-phase" id="search-phase"></div>
+    <div class="progress-bar"><div class="progress-fill" id="search-fill"></div></div>
+    <div class="progress-detail" id="search-detail"></div>
+  </div>
+  <div id="funnel" class="funnel" hidden></div>
+  <div class="list-head" id="list-head" hidden>
+    <span id="select-count"></span>
+    <span class="list-actions">
+      <button class="link" data-sel="all">全选</button>
+      <button class="link" data-sel="none">全不选</button>
+    </span>
+  </div>
+  <div id="job-list"></div>
+  <div class="empty" id="search-empty" hidden></div>
+</div>
+
+<!-- ══════════════ 打招呼语 ══════════════ -->
+<div class="screen" id="screen-greeting">
+  <div class="progress" id="greet-progress" hidden>
+    <div class="progress-phase" id="greet-phase"></div>
+    <div class="progress-bar"><div class="progress-fill" id="greet-fill"></div></div>
+    <div class="progress-detail" id="greet-detail"></div>
+  </div>
+  <div id="greet-list"></div>
+</div>
+
+<!-- ══════════════ 投递 ══════════════ -->
+<div class="screen" id="screen-send">
+  <div class="progress" id="send-progress">
+    <div class="progress-phase" id="send-phase"></div>
+    <div class="progress-bar"><div class="progress-fill" id="send-fill"></div></div>
+    <div class="progress-detail" id="send-detail"></div>
+  </div>
+  <div id="send-log" class="send-log"></div>
+</div>
+
+<footer class="actionbar">
+  <div class="action-hint" id="action-hint"></div>
+  <div class="action-row">
+    <button id="btn-reset" class="btn ghost">重置</button>
+    <button id="btn-action" class="btn primary">开始搜索</button>
+  </div>
+</footer>
+
+<div id="toast" class="toast" hidden></div>
+
+<script>
+// ════════ 仅用于本地视觉自查，不随扩展加载 ════════
+const MOCK_JOBS=[
+ {jobId:'a1',jobName:'AI产品经理（大模型方向）',companyName:'北京字节跳动科技有限公司',city:'北京',salaryDesc:'30-50K·15薪',experience:'3-5年',degree:'本科',hrActiveDesc:'3日内活跃',hrOnline:true,companyScale:'10000人以上',financeStage:'已上市'},
+ {jobId:'a2',jobName:'产品经理-社区方向',companyName:'行吟信息科技（上海）有限公司',city:'上海',salaryDesc:'25-45K·14薪',experience:'3-5年',degree:'本科',hrActiveDesc:'本周内活跃',companyScale:'1000-9999人',financeStage:'D轮及以上'}];
+const MOCK={
+ GET_RESUME:{ok:true,images:[{dataUrl:'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI5NiIgaGVpZ2h0PSIxMjgiPjxyZWN0IHdpZHRoPSI5NiIgaGVpZ2h0PSIxMjgiIGZpbGw9IiNlZGU4ZTIiLz48dGV4dCB4PSI0OCIgeT0iNjgiIGZvbnQtc2l6ZT0iMTMiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiM5OTkiPueugOWOhjE8L3RleHQ+PC9zdmc+'},{dataUrl:'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI5NiIgaGVpZ2h0PSIxMjgiPjxyZWN0IHdpZHRoPSI5NiIgaGVpZ2h0PSIxMjgiIGZpbGw9IiNlZGU4ZTIiLz48dGV4dCB4PSI0OCIgeT0iNjgiIGZvbnQtc2l6ZT0iMTMiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiM5OTkiPueugOWOhjI8L3RleHQ+PC9zdmc+'}],text:'x'.repeat(2206)},
+ SUGGEST_POSITIONS:{ok:true,positions:['AI产品经理','大模型产品经理','AIGC产品经理','Agent产品经理']},
+ GET_FILTER_DICT:{ok:true,sources:{salary:'dom',experience:'dom',degree:'dom',scale:'fallback',stage:'dom',industry:'dom'},
+  cities:[{code:'101280700',label:'珠海'}],positions:[{code:'1',label:'跨境电商产品开发'},{code:'2',label:'旅游产品经理'}],
+  dict:{salary:[{code:'402',label:'3K以下'},{code:'403',label:'3-5K'},{code:'404',label:'5-10K'},{code:'405',label:'10-20K'},{code:'406',label:'20-50K'},{code:'407',label:'50K以上'}],
+   experience:[{code:'102',label:'经验不限'},{code:'104',label:'1年以内'},{code:'105',label:'1-3年'},{code:'106',label:'3-5年'},{code:'107',label:'5-10年'},{code:'108',label:'10年以上'}],
+   degree:[{code:'202',label:'大专'},{code:'203',label:'本科'},{code:'204',label:'硕士'},{code:'205',label:'博士'}],
+   industry:[{code:'1',label:'互联网/AI'},{code:'2',label:'电子/通信/半导体'},{code:'3',label:'服务业'},{code:'4',label:'消费品/零售'},{code:'5',label:'房地产/建筑'},{code:'6',label:'教育培训'},{code:'7',label:'广告/传媒'},{code:'8',label:'制造业'},{code:'9',label:'专业服务'},{code:'10',label:'制药/医疗'},{code:'11',label:'汽车'},{code:'12',label:'交通/物流'},{code:'13',label:'能源/化工/环保'},{code:'14',label:'金融'},{code:'15',label:'政府/非营利'}],
+   scale:[{code:'301',label:'0-20人'},{code:'302',label:'20-99人'},{code:'303',label:'100-499人'},{code:'304',label:'500-999人'},{code:'305',label:'1000-9999人'},{code:'306',label:'10000人以上'}],
+   stage:[{code:'801',label:'未融资'},{code:'802',label:'天使轮'},{code:'803',label:'A轮'},{code:'804',label:'B轮'},{code:'805',label:'C轮'},{code:'806',label:'D轮及以上'},{code:'807',label:'已上市'},{code:'808',label:'不需要融资'}]}},
+ QUERY_JOBS:{ok:true,jobs:MOCK_JOBS,total:2}};
+window.chrome={runtime:{sendMessage:(m)=>Promise.resolve(MOCK[m.type]||{ok:true}),onMessage:{addListener(){}}},
+ storage:{local:{get:()=>Promise.resolve({}),set:()=>Promise.resolve()}}};
+</script>
+<script src="../shared/constants.js"></script>
+<script src="../shared/utils.js"></script>
+<script src="../data/companies.js"></script>
+<script src="../data/positions.js"></script>
+<script src="panel.js"></script>
+</body>
+</html>

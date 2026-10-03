@@ -1,0 +1,58 @@
+{
+  "manifest_version": 3,
+  "name": "闪投",
+  "version": "0.1.0",
+  "description": "BOSS 直聘大厂精准投递助手。只投你想去的公司，只投真的匹配的岗位。",
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_title": "闪投"
+  },
+  "side_panel": {
+    "default_path": "src/panel/panel.html"
+  },
+  "permissions": [
+    "storage",
+    "unlimitedStorage",
+    "scripting",
+    "sidePanel",
+    "alarms",
+    "tabs"
+  ],
+  "host_permissions": [
+    "*://*.zhipin.com/*",
+    "https://dashscope.aliyuncs.com/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "*://*.zhipin.com/*"
+      ],
+      "js": [
+        "src/content/sniffer.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "*://*.zhipin.com/*"
+      ],
+      "js": [
+        "src/shared/constants.js",
+        "src/shared/utils.js",
+        "src/content/filter-dict.js",
+        "src/content/collector.js",
+        "src/content/content.js"
+      ],
+      "run_at": "document_idle",
+      "world": "ISOLATED"
+    }
+  ],
+  "background": {
+    "service_worker": "src/background/service-worker.js"
+  }
+}
