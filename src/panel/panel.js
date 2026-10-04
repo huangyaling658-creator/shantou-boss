@@ -511,22 +511,27 @@ function splitToSubterms(word) {
   const w = String(word || '').trim();
   if (!w) return [];
   const lw = w.toLowerCase();
-  const out = new Set([w]);
-  // 去头部修饰
-  for (const h of REFINE_HEAD) {
-    if (lw.startsWith(h) && w.length > h.length) { out.add(w.slice(h.length)); break; }
-  }
-  // 去尾部职能
-  for (const t of REFINE_TAIL) {
-    if (w.endsWith(t) && w.length > t.length) { out.add(w.slice(0, w.length - t.length)); break; }
-  }
+  const out = new Set([w]);                         // 全词：AI产品经理
+  // 识别头部修饰(AI) 和 尾部职能(经理)
+  let head = '';
+  for (const h of REFINE_HEAD) { if (lw.startsWith(h) && w.length > h.length) { head = w.slice(0, h.length); break; } }
+  const body = head ? w.slice(head.length) : w;     // 去头主体：产品经理
+  let tail = '', core = body;
+  for (const t of REFINE_TAIL) { if (body.endsWith(t) && body.length > t.length) { tail = t; core = body.slice(0, body.length - t.length); break; } }
+  if (head) out.add(body);                          // 去头：产品经理
+  if (tail) out.add(head + core);                   // 保头去尾：AI产品
+  if (head && tail.length >= 2) out.add(head + tail);  // 头+尾(去中间名词)：AI经理；单字尾(师/官)太泛不拆
   // 只保留 2 字以上、或英文的子词
   return [...out].filter((s) => s.length >= 2);
 }
 function genRefineTerms(positions) {
   const set = new Set();
   for (const p of positions || []) for (const s of splitToSubterms(p)) set.add(s);
-  return [...set].map((term) => ({ term, on: true }));
+  const terms = [...set].map((term) => ({ term, on: true }));
+  // 追加「其他」桶：接住「不含任何子词」的岗位。默认点亮 → 全部子词 + 其他 = 显示全部，
+  // 一个不漏；点灭「其他」就只看落进子词的，点开「其他」就能查那些落空的是误判还是真不相关。
+  if (terms.length) terms.push({ term: '其他', on: true, other: true });
+  return terms;
 }
 
 function togglePosition(p) {
@@ -1320,22 +1325,16 @@ function buildJobCard(j) {
   el.className = 'jcard' + (on ? '' : ' off');
   el.dataset.jobid = j.jobId;
 
-  const tags = [];
-  if (j.experience) tags.push(`<span class="tag">${esc(j.experience)}</span>`);
-  if (j.degree) tags.push(`<span class="tag">${esc(j.degree)}</span>`);
-  if (j.hrActiveDesc) tags.push(`<span class="tag">${esc(j.hrActiveDesc)}</span>`);
-
+  // 只保留公司名 + 薪资（对齐同类产品）。资历、学历要求按用户要求不显示。
   const custom = S.jobGreet?.[j.jobId] || '';
   el.innerHTML = `
     <label class="jcheck"><input type="checkbox" ${on ? 'checked' : ''}></label>
     <div class="body">
       <div class="jname">${esc(j.jobName)}</div>
-      <div class="jcompany">${esc(j.companyName)}</div>
+      <div class="jcompany">${esc(j.companyName || '')}</div>
       <div class="jsalary">${esc(j.salaryDesc || '薪资面议')}</div>
-      <div class="tags">${tags.join('')}</div>
       <div class="jgreet-toggle">单岗位－自定义招呼语 <span class="tri">▾</span></div>
-      <textarea class="jgreet" rows="3" hidden
-        placeholder="留空则发送上面统一的招呼语。">${esc(custom)}</textarea>
+      <textarea class="jgreet" rows="3" hidden>${esc(custom)}</textarea>
     </div>`;
 
   el.querySelector('input').addEventListener('change', (e) => {
@@ -1361,11 +1360,16 @@ function buildJobCard(j) {
  *  没有子词可筛(没岗位词)→ 全给；有子词但一个都没点亮 → 0 个。 */
 function visibleJobs() {
   if (!S.refineTerms || !S.refineTerms.length) return S.jobs;   // 没得筛，全给
-  const terms = S.refineTerms.filter((t) => t.on).map((t) => t.term.toLowerCase());
-  if (!terms.length) return [];   // 一个词都不点 = 不显示
+  const lit = S.refineTerms.filter((t) => t.on);
+  if (!lit.length) return [];   // 一个词都不点 = 不显示
+  const realTerms = S.refineTerms.filter((t) => !t.other).map((t) => t.term.toLowerCase());
+  const litReal = lit.filter((t) => !t.other).map((t) => t.term.toLowerCase());
+  const otherLit = lit.some((t) => t.other);
   return S.jobs.filter((j) => {
     const n = (j.jobName || '').toLowerCase();
-    return terms.some((t) => n.includes(t));
+    if (litReal.some((t) => n.includes(t))) return true;                  // 命中任一点亮的子词
+    if (otherLit && !realTerms.some((t) => n.includes(t))) return true;   // 「其他」：不含任何子词
+    return false;
   });
 }
 
@@ -1376,10 +1380,16 @@ function renderRefineBar() {
   sec.hidden = !(S.refineTerms && S.refineTerms.length);
   const box = $('refine-chips');
   box.innerHTML = '';
+  const jobs = S.jobs || [];
+  const realTerms = (S.refineTerms || []).filter((t) => !t.other).map((t) => t.term.toLowerCase());
   for (const t of (S.refineTerms || [])) {
+    const tl = t.term.toLowerCase();
+    const cnt = t.other
+      ? jobs.filter((j) => { const n = (j.jobName || '').toLowerCase(); return !realTerms.some((x) => n.includes(x)); }).length
+      : jobs.filter((j) => (j.jobName || '').toLowerCase().includes(tl)).length;
     const chip = document.createElement('span');
     chip.className = 'pill multi' + (t.on ? ' on' : '');
-    chip.textContent = t.term;
+    chip.innerHTML = `${esc(t.term)} <b>${cnt}</b>`;   // 标数量：一眼看清这个词圈住几个
     chip.addEventListener('click', () => { t.on = !t.on; afterRefineChange(); });
     box.appendChild(chip);
   }
@@ -1464,17 +1474,6 @@ $('sel-all').addEventListener('change', (e) => {
   renderJobs();
 });
 
-// 精筛加词（回车）
-$('refine-add').addEventListener('keydown', (e) => {
-  if (e.key !== 'Enter') return;
-  const term = e.target.value.trim();
-  if (term && !(S.refineTerms || []).some((t) => t.term === term)) {
-    S.refineTerms.push({ term, on: true });
-  }
-  e.target.value = '';
-  afterRefineChange();
-});
-
 // 招呼语模式：AI 定制 / 自定义
 $('greet-mode').addEventListener('click', (e) => {
   const pill = e.target.closest('[data-mode]');
@@ -1552,7 +1551,6 @@ function onGreetingItem(d) {
   if (el) {
     const ta = el.querySelector('.jgreet');
     ta.value = d.text || '';
-    ta.placeholder = '留空则发送上面统一的招呼语。';
     el.classList.remove('generating');
     S.jobGreet = S.jobGreet || {};
     S.jobGreet[d.jobId] = d.text || '';
@@ -1576,7 +1574,6 @@ async function onGreetingDone(task) {
   // AI 模式：招呼语已就地填进各卡片，把还在沙漏态的清掉（生成失败的兜底）
   for (const el of document.querySelectorAll('#job-list .jcard.generating')) {
     el.classList.remove('generating');
-    el.querySelector('.jgreet').placeholder = '留空则发送上面统一的招呼语。';
   }
   const g = task.greetStat || {};
   if (g.failed) toast(`${g.failed} 条生成失败，用的是兜底语，可手动改`, 4000);

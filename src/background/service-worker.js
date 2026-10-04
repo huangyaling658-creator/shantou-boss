@@ -339,6 +339,8 @@ async function augmentFromCompanyPages(merged, config, onProgress) {
         const msPg = Math.round(performance.now() - sPg);
         let n = 0;
         for (const j of res.jobs || []) {
+          // 公司招聘页的卡片常不重复公司名，这里用正在采的这家公司名补上，保证卡片能显示公司
+          if (!j.companyName) j.companyName = company;
           if (j.jobId && !merged.has(j.jobId)) { j._fromCompanyPage = true; merged.set(j.jobId, j); n++; }
         }
         added += n;

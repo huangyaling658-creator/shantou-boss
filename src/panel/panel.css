@@ -371,6 +371,7 @@ button.btn.primary:disabled { background: #a9cbbb; color: #fff; cursor: not-allo
 .jcard .body { flex: 1; min-width: 0; }
 .jcard .jname { font-size: 13.5px; font-weight: 600; color: var(--text); line-height: 1.35; }
 .jcard .jcompany { font-size: 11.5px; color: var(--muted); margin-top: 4px; }
+.jcard .jcompany:empty, .jcard .jsalary:empty { display: none; }
 .jcard .jsalary { font-size: 12.5px; font-weight: 700; color: var(--accent); margin-top: 4px; }
 .jcard .tags { margin-top: 7px; display: flex; flex-wrap: wrap; gap: 6px; }
 .jcard .tag {

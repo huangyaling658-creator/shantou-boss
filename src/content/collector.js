@@ -238,6 +238,16 @@ const Collector = {
       for (const s of sels) { const n = el.querySelector(s); if (n && n.textContent.trim()) return n.textContent.trim(); }
       return '';
     };
+    // 薪资格式很固定（25-50K、8-12K·15薪、1-2万、200-400元/天、面议…）。
+    // 类名靠不住（BOSS 各页 class 不一样），所以类名命中就用、认不出就从整张卡文字里正则认。
+    // 「3-5年」「本科」不含 K/万/元，不会被误当薪资。
+    const SAL_RE = /\d+(?:\.\d+)?\s*[-~至]\s*\d+(?:\.\d+)?\s*[KkWw万千元](?:[·,、]\s*\d+\s*薪)?(?:\s*\/?\s*[天日月])?|\d+(?:\.\d+)?\s*[KkWw万千元]\s*以上|薪资面议|面议/;
+    const pickSalary = (el) => {
+      const byClass = pick(el, ['.job-salary', '.salary', '[class*="salary"]', '.red', 'em']);
+      if (byClass) { const m = byClass.match(SAL_RE); if (m) return m[0]; }
+      const m = (el.innerText || el.textContent || '').match(SAL_RE);
+      return m ? m[0] : (byClass || '');
+    };
     const readCards = () => {
       let cards = [];
       for (const sel of CARD_SELECTORS) { cards = document.querySelectorAll(sel); if (cards.length) break; }
@@ -263,7 +273,7 @@ const Collector = {
         seen.set(jobId, this.normalizeJob({
           encryptJobId: jobId,
           jobName: pick(c, ['.job-name', '.job-title .job-name', '[class*="job-name"]', '.name']),
-          salaryDesc: pick(c, ['.job-salary', '.salary', '[class*="salary"]', '.red']),
+          salaryDesc: pickSalary(c),
           brandName: pick(c, ['.company-name', '[class*="company-name"]', '.company-info .name']),
           cityName: pick(c, ['.job-area', '.job-area-wrapper', '[class*="job-area"]', '[class*="city"]']),
         }));
