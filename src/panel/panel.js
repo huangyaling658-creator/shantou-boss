@@ -171,12 +171,24 @@ function showScreen(name) {
     $(`screen-${s}`).classList.toggle('on', s === name);
   }
   $('btn-back').hidden = name === 'config';
+  $('btn-forward').hidden = !forwardTarget();   // 有「下一页」可去才显示 →
   // 离开投递屏时收掉「投递中」的底部计数条，别残留到别的页面
   if (name !== 'send') { $('action-count').hidden = true; $('btn-reset').hidden = false; }
   if (name === 'config') renderResumeBar();
   window.scrollTo(0, 0);
   updateAction();
 }
+
+/** 「下一页」要去哪：条件页有结果→回结果页；投递中在结果页→跳投递进度。没有就返回 null（→ 隐藏）。*/
+function forwardTarget() {
+  if (S.screen === 'config' && (S.hasResult || S.busy)) return 'result';
+  if (S.screen === 'result' && S.sending) return 'send';
+  return null;
+}
+$('btn-forward').addEventListener('click', () => {
+  const t = forwardTarget();
+  if (t) showScreen(t);
+});
 
 /** 条件页顶部「返回结果」入口：有结果就显示，点了切回结果页（不丢答案）*/
 function renderResumeBar() {
@@ -528,9 +540,9 @@ function genRefineTerms(positions) {
   const set = new Set();
   for (const p of positions || []) for (const s of splitToSubterms(p)) set.add(s);
   const terms = [...set].map((term) => ({ term, on: true }));
-  // 追加「其他」桶：接住「不含任何子词」的岗位。默认点亮 → 全部子词 + 其他 = 显示全部，
-  // 一个不漏；点灭「其他」就只看落进子词的，点开「其他」就能查那些落空的是误判还是真不相关。
-  if (terms.length) terms.push({ term: '其他', on: true, other: true });
+  // 追加「其他」桶：接住「不含任何子词」的岗位。默认【不点】→ 默认只显示命中子词的；
+  // 「其他 N」带数量摆着，想查那些落空的是误判还是真不相关，点一下就显出来（不偷偷藏）。
+  if (terms.length) terms.push({ term: '其他', on: false, other: true });
   return terms;
 }
 
@@ -841,10 +853,13 @@ document.querySelectorAll('#search-mode .pill').forEach((p) => {
 // ── 精投耗时预估 ──
 // 一个「公司×词」是一个单位。单位内翻 8~10 页、每页 4~8 秒 + 固定开销。
 // 单元数 = 公司数 × max(词数,1)。总时长按单元算，供开搜前预告 + 搜索中倒推。
+// 按「全局冷却队列」模型估时：翻页是全局串行的(每次翻页前过一个随机冷却闸)，
+// 所以总翻页耗时 = 总翻页数 × 冷却均值，【不除以并行数】。第 1 页不占冷却。
+// brandId 解析是每家串行的固定开销。翻页数用现实区间(非硬上限 15)，免得吓人。
 const EST = {
-  perCompanyOverheadSec: 12,   // 每家 brandId 解析 + 导航 + 换页停顿的固定开销
-  unitMinSec: 10 * 4 + 4,      // 一个「公司×词」最快 ≈ 10页×4秒 + 驱动框等 ≈ 44s
-  unitMaxSec: 15 * 6 + 8,      // 最慢 ≈ 15页×6秒 + 开销 ≈ 98s
+  perCompanyOverheadSec: 12,   // 每家 brandId 解析 + 开页搜词的固定开销
+  estPagesMin: 3,              // 预估每「公司×词」翻几页（现实区间）
+  estPagesMax: 10,
 };
 function estimateUnits() {
   const companies = S.companies.length;
@@ -855,8 +870,11 @@ function estimateRangeSec() {
   const companies = S.companies.length;
   const units = estimateUnits();
   if (!units) return null;
+  const cdAvg = ((CONFIG.COOLDOWN_MIN_MS + CONFIG.COOLDOWN_MAX_MS) / 2) / 1000;   // 冷却均值(秒)
   const overhead = companies * EST.perCompanyOverheadSec;
-  return { min: overhead + units * EST.unitMinSec, max: overhead + units * EST.unitMaxSec };
+  const min = overhead + units * Math.max(0, EST.estPagesMin - 1) * cdAvg;
+  const max = overhead + units * Math.max(0, EST.estPagesMax - 1) * cdAvg;
+  return { min, max };
 }
 function fmtMin(sec) {
   const m = sec / 60;
@@ -1140,7 +1158,9 @@ function renderSearchProgress(task) {
     const doneFrac = ((p.unitDone || 0) + subFrac) / p.unitTotal;
     const pct = Math.min(99, Math.max(1, Math.round(doneFrac * 100)));
     const unitsLeft = Math.max(0, p.unitTotal - (p.unitDone || 0) - subFrac);
-    const midUnitSec = (EST.unitMinSec + EST.unitMaxSec) / 2;
+    // 每单元剩余耗时≈中位页数×冷却均值（同 estimateRangeSec 的模型）
+    const cdAvg = ((CONFIG.COOLDOWN_MIN_MS + CONFIG.COOLDOWN_MAX_MS) / 2) / 1000;
+    const midUnitSec = ((EST.estPagesMin + EST.estPagesMax) / 2 - 1) * cdAvg;
     const remainSec = unitsLeft * midUnitSec;
     $('search-fill').style.width = `${pct}%`;
     $('search-detail').textContent =

@@ -63,6 +63,11 @@
       return { ok: true, ...r };
     },
 
+    // 单步读页：翻一页(可选)+读这一页。冷却节拍由 SW 全局掐，这里不睡。
+    [MSG.COMPANY_DOM_PAGE]: async (payload = {}) => {
+      return await Collector.collectOneDomPage({ turnFirst: !!payload.turnFirst });
+    },
+
     [MSG.CHECK_RISK]: async () => ({ ok: true, ...Collector.checkRisk() }),
 
     // 抓筛选项字典。三个来源各自独立，任一失败不影响其余

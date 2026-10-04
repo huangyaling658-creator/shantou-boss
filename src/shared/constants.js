@@ -43,6 +43,7 @@ const MSG = {
   SEARCH_BRAND: 'SEARCH_BRAND',     // 按公司名查 BOSS 品牌库
   COMPANY_BOX_SEARCH: 'COMPANY_BOX_SEARCH',  // 驱动公司主页「查找职位关键词」框搜索
   COMPANY_DOM_COLLECT: 'COMPANY_DOM_COLLECT',  // 直接读公司招聘页的岗位卡片（不抓接口）
+  COMPANY_DOM_PAGE: 'COMPANY_DOM_PAGE',  // 单步：翻一页(可选)+读这一页的卡，由 SW 全局调度
   CHECK_RISK: 'CHECK_RISK',         // 读页面上的验证码/风控迹象
   GREETING_SWITCH: 'GREETING_SWITCH',   // 读写 BOSS 自带招呼语开关
   OPEN_DETAIL: 'OPEN_DETAIL',           // 打开岗位详情页并读沟通按钮文案
@@ -126,9 +127,12 @@ const CONFIG = {
   MAX_PAGES: 6,                   // 海投翻页上限（精投用下面的 8~10 随机）
   COMPANY_PAGES_MIN: 10,          // 精投公司页每词翻页：10~15 页随机
   COMPANY_PAGES_MAX: 15,
-  PARALLEL_COMPANIES: 4,          // 精投同时并行几家公司（4 家一起搜）
-  // 并行越多、每页间隔越长，把总访问频率的增幅压平（并行×1/间隔 不成倍上升）
-  //   1 家：4~6 秒；2 家：5~7 秒；3 家：6~8 秒；4 家：6~8 秒
+  PARALLEL_COMPANIES: 4,          // 精投同时在采几家公司（池子大小；多出来的排队，谁先完谁补位）
+  // 冷却时间：全局翻页节拍。无论几家在采，任意两次翻页之间全局至少隔这么久（随机，精确到 0.01 秒）。
+  // 效果：任意时刻只有一个请求在飞、均匀无突刺，这是躲限流(code:37)最理想的请求形状。
+  COOLDOWN_MIN_MS: 2000,          // 冷却下限 2.00 秒
+  COOLDOWN_MAX_MS: 6000,          // 冷却上限 6.00 秒
+  // ↓ 旧的「每家各自 sleep」间隔，全局冷却上线后不再用（留着给老的 COMPANY_DOM_COLLECT 兜底）
   PARALLEL_INTERVAL: { 1: [4000, 6000], 2: [5000, 7000], 3: [6000, 8000], 4: [6000, 8000] },
   COLLECT_CAP_PER_SEARCH: 225,    // 单个关键词最多收这么多就停（配合 10~15 页，约15/页）
   // 召回到这么多个岗位就够了，不再往下翻。

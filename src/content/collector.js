@@ -241,7 +241,7 @@ const Collector = {
     // 薪资格式很固定（25-50K、8-12K·15薪、1-2万、200-400元/天、面议…）。
     // 类名靠不住（BOSS 各页 class 不一样），所以类名命中就用、认不出就从整张卡文字里正则认。
     // 「3-5年」「本科」不含 K/万/元，不会被误当薪资。
-    const SAL_RE = /\d+(?:\.\d+)?\s*[-~至]\s*\d+(?:\.\d+)?\s*[KkWw万千元](?:[·,、]\s*\d+\s*薪)?(?:\s*\/?\s*[天日月])?|\d+(?:\.\d+)?\s*[KkWw万千元]\s*以上|薪资面议|面议/;
+    const SAL_RE = /\d+(?:\.\d+)?\s*[-~至]\s*\d+(?:\.\d+)?\s*[KkWw万千元](?:[·,、]\s*\d+\s*薪)?(?:\s*\/?\s*(?:小时|[天日周月]))?|\d+(?:\.\d+)?\s*[KkWw万千元]\s*以上|薪资面议|面议/;
     const pickSalary = (el) => {
       const byClass = pick(el, ['.job-salary', '.salary', '[class*="salary"]', '.red', 'em']);
       if (byClass) { const m = byClass.match(SAL_RE); if (m) return m[0]; }
@@ -302,6 +302,72 @@ const Collector = {
     }
 
     return { jobs: [...seen.values()], pages: page, stoppedBy };
+  },
+
+  /**
+   * 单步：翻一页(可选) + 读「当前这一页」的岗位卡，然后立刻返回。
+   * 翻页的节拍(冷却时间)不在这里睡，由 Service Worker 全局统一掐——这样四家公司
+   * 共用一条全局队列，任意时刻只有一个请求在飞，均匀无突刺。
+   *   turnFirst=false：读第 1 页（刚进页/刚搜完词，不翻）
+   *   turnFirst=true ：先点「下一页」，等渲染，再读这一页
+   * 返回 { ok, jobs, hasNext, turned }。
+   */
+  async collectOneDomPage({ turnFirst = false } = {}) {
+    const CARD_SELECTORS = [
+      '.position-job-list li', 'ul.position-job-list > li',
+      '.job-card-box', 'li.job-card-wrapper', '[class*="job-card"]',
+    ];
+    const NEXT_SELECTORS = [
+      '.options-pages a.next:not(.disabled)', 'a.ui-icon-arrow-right',
+      '.pager-next:not(.disabled)', '.options-pages a:last-child:not(.disabled)',
+    ];
+    const pick = (el, sels) => {
+      for (const s of sels) { const n = el.querySelector(s); if (n && n.textContent.trim()) return n.textContent.trim(); }
+      return '';
+    };
+    const SAL_RE = /\d+(?:\.\d+)?\s*[-~至]\s*\d+(?:\.\d+)?\s*[KkWw万千元](?:[·,、]\s*\d+\s*薪)?(?:\s*\/?\s*(?:小时|[天日周月]))?|\d+(?:\.\d+)?\s*[KkWw万千元]\s*以上|薪资面议|面议/;
+    const pickSalary = (el) => {
+      const byClass = pick(el, ['.job-salary', '.salary', '[class*="salary"]', '.red', 'em']);
+      if (byClass) { const m = byClass.match(SAL_RE); if (m) return m[0]; }
+      const m = (el.innerText || el.textContent || '').match(SAL_RE);
+      return m ? m[0] : (byClass || '');
+    };
+    const findNext = () => {
+      for (const s of NEXT_SELECTORS) { const n = document.querySelector(s); if (n && n.offsetHeight > 0) return n; }
+      return [...document.querySelectorAll('a,button,.ui-icon-arrow-right')]
+        .find((el) => /下一页|下一頁/.test(el.textContent || '') && !el.className.includes('disabled')) || null;
+    };
+    const readCards = () => {
+      for (const sel of CARD_SELECTORS) { const cs = document.querySelectorAll(sel); if (cs.length) return cs; }
+      return [];
+    };
+
+    let turned = false;
+    if (turnFirst) {
+      const next = findNext();
+      if (!next) return { ok: true, jobs: [], hasNext: false, turned: false };
+      next.click();
+      turned = true;
+      await U.sleep(900);   // 等翻页后新卡渲染
+    } else {
+      await U.sleep(500);   // 等本页渲染
+    }
+
+    const jobs = [];
+    for (const c of readCards()) {
+      const link = c.querySelector('a[href*="job_detail"]')?.getAttribute('href')
+        || (/job_detail/.test(c.innerHTML) ? (c.querySelector('a')?.getAttribute('href') || '') : '');
+      const jobId = (String(link).match(/job_detail\/([^.?]+)/) || [])[1] || '';
+      if (!jobId) continue;
+      jobs.push(this.normalizeJob({
+        encryptJobId: jobId,
+        jobName: pick(c, ['.job-name', '.job-title .job-name', '[class*="job-name"]', '.name']),
+        salaryDesc: pickSalary(c),
+        brandName: pick(c, ['.company-name', '[class*="company-name"]', '.company-info .name']),
+        cityName: pick(c, ['.job-area', '.job-area-wrapper', '[class*="job-area"]', '[class*="city"]']),
+      }));
+    }
+    return { ok: true, jobs, hasNext: !!findNext(), turned };
   },
 
   /**

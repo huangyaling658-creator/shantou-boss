@@ -259,9 +259,8 @@ async function augmentFromCompanyPages(merged, config, onProgress) {
   const diag = [];
   augmentFromCompanyPages._diag = diag;
 
-  // 并行家数 + 对应的翻页间隔（并行越多间隔越长，把访问频率增幅压平）
+  // 池子大小：同时在采几家。多出来的排队，谁先收完谁补位。翻页节拍改由全局冷却闸统一掐。
   const P = Math.max(1, Math.min(CONFIG.PARALLEL_COMPANIES || 2, companies.length));
-  const interval = (CONFIG.PARALLEL_INTERVAL || {})[Math.min(P, 4)] || [6000, 8000];
 
   // 进度：一个「公司×词」是一个单元，总数 = 公司数 × 词数（和面板预估一致）
   const unitTotal = companies.length * queries.length;
@@ -290,76 +289,100 @@ async function augmentFromCompanyPages(merged, config, onProgress) {
   }
   if (!brandList.length) return 0;
 
-  // ── 阶段 B：公司页读卡并行跑，每家一个后台标签（P 家并行，间隔已随 P 拉长）──
-  // 后台标签读卡/点下一页通常可行（不走签名 joblist，而是读页面已渲染的卡 + 点翻页触发页面自己的请求）。
-  const collectOne = async ({ company, brandId, msBrand }) => {
-    if (state.task.phase === 'aborted') return;
-    let tab;
-    try {
-      tab = await chrome.tabs.create({ url: BOSS.PAGE.COMPANY_JOBS(brandId), active: false });
-      const tabId = tab.id;
-      const sNav = performance.now();
-      // 进后台公司页这段有近 30 秒不发消息，既让面板像卡死、也可能把 SW 饿到被回收。
-      // 这里发一条心跳：既给 SW 添活动（配合 alarms 双保险），也让用户看到在干活。
-      if (onProgress) onProgress({ company, keyword: '正在打开公司页', unitDone, unitTotal, domPage: 0 });
-      await waitForTabComplete(tabId);
-      for (let i = 0; i < 20; i++) {
-        await U.sleep(400);
-        if ((await pingTab(tabId)).ok) break;
-        if (i % 5 === 0 && onProgress) onProgress({ company, keyword: '正在打开公司页', unitDone, unitTotal, domPage: 0 });
-      }
-      await U.sleep(1200);
-      const msNav = Math.round(performance.now() - sNav);
-
-      for (let qi = 0; qi < queries.length; qi++) {
-        if (state.task.phase === 'aborted') break;
-        const q = queries[qi];
-        if (onProgress) onProgress({ company, keyword: q, unitDone, unitTotal, domPage: 0 });
-
-        const sBox = performance.now();
-        let boxOk = true;
-        if (q) {
-          const drive = await askTab(tabId, MSG.COMPANY_BOX_SEARCH, { keyword: q }).catch((e) => ({ ok: false, reason: String(e.message || e) }));
-          boxOk = drive && drive.ok;
-          await U.sleep(1000);
-        }
-        const msBox = Math.round(performance.now() - sBox);
-
-        const sPg = performance.now();
-        let res;
-        try {
-          res = await askTab(tabId, MSG.COMPANY_DOM_COLLECT, {
-            maxPages: U.randInt(CONFIG.COMPANY_PAGES_MIN || 10, CONFIG.COMPANY_PAGES_MAX || 15),
-            cap: CONFIG.COLLECT_CAP_PER_SEARCH,
-            intervalMin: interval[0], intervalMax: interval[1],
-          });
-        } catch (e) {
-          res = { jobs: [], stoppedBy: 'error:' + String(e.message || e).slice(0, 30) };
-        }
-        const msPg = Math.round(performance.now() - sPg);
-        let n = 0;
-        for (const j of res.jobs || []) {
-          // 公司招聘页的卡片常不重复公司名，这里用正在采的这家公司名补上，保证卡片能显示公司
-          if (!j.companyName) j.companyName = company;
-          if (j.jobId && !merged.has(j.jobId)) { j._fromCompanyPage = true; merged.set(j.jobId, j); n++; }
-        }
-        added += n;
-        const got = (res.jobs || []).length;
-        console.log(`[闪投] 公司页 ${company}「${q || '全部'}」读卡 ${got} 新增 ${n} 停因 ${res.stoppedBy}`,
-          `| 计时(ms) brandId=${msBrand} 进页=${msNav} 驱动框=${msBox} 翻页=${msPg}`);
-        diag.push({ company, keyword: q || '全部', got, stop: res.stoppedBy, source: 'dom', boxOk, ms: { brandId: msBrand, nav: msNav, box: msBox, pages: msPg } });
-        unitDone++;
-        if (onProgress) onProgress({ company, keyword: q, unitDone, unitTotal });
-      }
-    } catch (e) {
-      console.log('[闪投] 公司页采集异常', company, String(e.message || e));
-      diag.push({ company, step: '采集异常:' + String(e.message || e).slice(0, 30) });
-    } finally {
-      if (tab && tab.id) chrome.tabs.remove(tab.id).catch(() => {});
-    }
+  // ── 阶段 B：worker 池(P 家在采) + 全局冷却节拍 ──
+  // 开局 P 家一起收第 1 页；之后全局一条队列，任意两次翻页之间至少隔一个随机冷却时间
+  // (2~6秒，精确到0.01秒)，轮着来：A翻读→冷却→B→冷却→C→D→回A。任意时刻只有一个请求在飞，
+  // 均匀无突刺，这是躲限流最理想的请求形状。谁先收完谁退出，队列里下一家(E/F)立刻补位。
+  const cdLo = CONFIG.COOLDOWN_MIN_MS || 2000;
+  const cdHi = CONFIG.COOLDOWN_MAX_MS || 6000;
+  let lastTurnAt = 0;
+  const cooldown = async () => {
+    const want = Math.round((cdLo + Math.random() * (cdHi - cdLo)) / 10) * 10;   // 0.01秒精度
+    const gap = Date.now() - lastTurnAt;
+    if (lastTurnAt && gap < want) await U.sleep(want - gap);
+    lastTurnAt = Date.now();
   };
+  const pagesCap = () => U.randInt(CONFIG.COMPANY_PAGES_MIN || 10, CONFIG.COMPANY_PAGES_MAX || 15);
 
-  await runInBatches(brandList, P, collectOne);
+  // 把一页卡入库：全局 merged 去重 + slot 自己的 seen；返回这页给「这家」新增了几个
+  const absorb = (slot, res) => {
+    let nSlot = 0;
+    for (const j of res.jobs || []) {
+      if (!j.companyName) j.companyName = slot.company;
+      if (!j.jobId) continue;
+      if (!slot.seen.has(j.jobId)) { slot.seen.add(j.jobId); nSlot++; }
+      if (!merged.has(j.jobId)) { j._fromCompanyPage = true; merged.set(j.jobId, j); added++; }
+    }
+    return nSlot;
+  };
+  const readPage1 = async (slot) => {
+    const q = queries[slot.kwi] || '';
+    if (q) { await askTab(slot.tabId, MSG.COMPANY_BOX_SEARCH, { keyword: q }).catch(() => {}); await U.sleep(800); }
+    const res = await askTab(slot.tabId, MSG.COMPANY_DOM_PAGE, { turnFirst: false }).catch(() => ({ jobs: [], hasNext: false }));
+    slot.lastNew = absorb(slot, res); slot.page = 1; slot.lastHasNext = !!res.hasNext;
+    if (onProgress) onProgress({ company: slot.company, keyword: q, unitDone, unitTotal, collected: merged.size, domPage: 1, domMaxPages: slot.maxPages });
+  };
+  // 开一家：后台标签 → 导航 → 就绪 → 搜词 → 读第 1 页
+  const startSlot = async (c) => {
+    const slot = { company: c.company, brandId: c.brandId, tabId: null, kwi: 0, page: 0, seen: new Set(), maxPages: pagesCap(), lastHasNext: false, lastNew: 0 };
+    const tab = await chrome.tabs.create({ url: BOSS.PAGE.COMPANY_JOBS(c.brandId), active: false });
+    slot.tabId = tab.id;
+    if (onProgress) onProgress({ company: slot.company, keyword: '正在打开公司页', unitDone, unitTotal, collected: merged.size });
+    await waitForTabComplete(slot.tabId);
+    for (let i = 0; i < 20; i++) { await U.sleep(400); if ((await pingTab(slot.tabId)).ok) break; }
+    await U.sleep(1000);
+    await readPage1(slot);
+    return slot;
+  };
+  const kwExhausted = (slot) => !slot.lastHasNext || slot.page >= slot.maxPages || slot.lastNew === 0;
+  const nextKeyword = async (slot) => {   // 推进到下一个词；没有更多词返回 false(整家完)
+    slot.kwi++;
+    if (slot.kwi >= queries.length) return false;
+    slot.page = 0; slot.seen = new Set(); slot.maxPages = pagesCap();
+    await readPage1(slot);
+    return true;
+  };
+  const closeSlot = (slot) => { if (slot && slot.tabId) chrome.tabs.remove(slot.tabId).catch(() => {}); };
+
+  const queue = brandList.slice();
+  const active = [];
+  // 开局灌满池子：第 1 页一起收（并发，符合「第一轮 A/B/C/D 一起」）
+  const firstBatch = queue.splice(0, P);
+  const started = await Promise.all(firstBatch.map((c) => startSlot(c).catch((e) => {
+    diag.push({ company: c.company, step: '开页异常:' + String(e.message || e).slice(0, 24) }); return null;
+  })));
+  for (const s of started) if (s) active.push(s);
+
+  // 全局轮转
+  let rr = 0, guard = 0;
+  const hardCap = brandList.length * (queries.length || 1) * ((CONFIG.COMPANY_PAGES_MAX || 15) + 3) + 50;
+  while (active.length && state.task.phase !== 'aborted') {
+    if (++guard > hardCap) { console.log('[闪投] 调度器达硬上限，收尾'); break; }
+    const slot = active[rr % active.length];
+    if (kwExhausted(slot)) {
+      unitDone++;   // 这个(公司×词)单元收完
+      diag.push({ company: slot.company, keyword: queries[slot.kwi] || '全部', got: slot.seen.size, source: 'dom-queue' });
+      const more = await nextKeyword(slot);
+      if (!more) {
+        closeSlot(slot);
+        active.splice(active.indexOf(slot), 1);
+        if (queue.length) { const s = await startSlot(queue.shift()).catch(() => null); if (s) active.push(s); }  // E 补位
+        rr = 0;
+      } else { rr++; }
+      if (onProgress) onProgress({ company: slot.company, keyword: '', unitDone, unitTotal, collected: merged.size });
+      continue;
+    }
+    // 正常翻一页：过全局冷却闸 → 翻+读这一页
+    await cooldown();
+    if (state.task.phase === 'aborted') break;
+    const res = await askTab(slot.tabId, MSG.COMPANY_DOM_PAGE, { turnFirst: true }).catch(() => ({ jobs: [], hasNext: false, turned: false }));
+    slot.page++;
+    slot.lastNew = absorb(slot, res);
+    slot.lastHasNext = res.turned === false ? false : !!res.hasNext;
+    if (onProgress) onProgress({ company: slot.company, keyword: queries[slot.kwi] || '', unitDone, unitTotal, collected: merged.size, domPage: slot.page, domMaxPages: slot.maxPages });
+    rr++;
+  }
+  for (const s of active) closeSlot(s);   // 收尾：关掉还开着的标签
   return added;
 }
 
