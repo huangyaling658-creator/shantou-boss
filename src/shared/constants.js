@@ -44,6 +44,7 @@ const MSG = {
   COMPANY_BOX_SEARCH: 'COMPANY_BOX_SEARCH',  // 驱动公司主页「查找职位关键词」框搜索
   COMPANY_DOM_COLLECT: 'COMPANY_DOM_COLLECT',  // 直接读公司招聘页的岗位卡片（不抓接口）
   COMPANY_DOM_PAGE: 'COMPANY_DOM_PAGE',  // 单步：翻一页(可选)+读这一页的卡，由 SW 全局调度
+  READ_BRAND_DOM: 'READ_BRAND_DOM',  // 从搜索结果页 DOM 里读公司 brandId（不走签名接口，可后台并行）
   CHECK_RISK: 'CHECK_RISK',         // 读页面上的验证码/风控迹象
   GREETING_SWITCH: 'GREETING_SWITCH',   // 读写 BOSS 自带招呼语开关
   OPEN_DETAIL: 'OPEN_DETAIL',           // 打开岗位详情页并读沟通按钮文案
@@ -124,21 +125,21 @@ const BOSS = {
 // ── 运行参数 ──
 const CONFIG = {
   // 召回
-  MAX_PAGES: 6,                   // 海投翻页上限（精投用下面的 8~10 随机）
+  MAX_PAGES: 15,                  // 海投翻页上限（约15/页 → 单搜最多 ~450，够到 BOSS 单搜天花板）
   COMPANY_PAGES_MIN: 10,          // 精投公司页每词翻页：10~15 页随机
   COMPANY_PAGES_MAX: 15,
-  PARALLEL_COMPANIES: 4,          // 精投同时在采几家公司（池子大小；多出来的排队，谁先完谁补位）
-  // 冷却时间：全局翻页节拍。无论几家在采，任意两次翻页之间全局至少隔这么久（随机，精确到 0.01 秒）。
-  // 效果：任意时刻只有一个请求在飞、均匀无突刺，这是躲限流(code:37)最理想的请求形状。
-  COOLDOWN_MIN_MS: 2000,          // 冷却下限 2.00 秒
-  COOLDOWN_MAX_MS: 6000,          // 冷却上限 6.00 秒
-  // ↓ 旧的「每家各自 sleep」间隔，全局冷却上线后不再用（留着给老的 COMPANY_DOM_COLLECT 兜底）
+  PARALLEL_COMPANIES: 8,          // 精投并行上限：每轮最多 8 个页面同时采（brandId 解析也按这个并行）
+  // 全同步模式的「冷却时间」：每家公司各翻各的，翻一页后独立随机睡 [4+N, (4+N)×2] 秒，
+  // N = 当前还在跑的家数。并行越多间隔越宽，总速率自己踩刹车（全局逼近每 1.5 秒一个封顶）；
+  // 有公司收完 N 变小，剩下的自动提速。精确到 0.01 秒。
+  TASK_HARD_TIMEOUT_MS: 300000,   // 5 分钟硬封顶：总时长到点就停，把已收的落库展示
+  // ↓ 旧的全局队列冷却 / 按并行数间隔，全同步上线后不再用（留给老路径兜底）
+  COOLDOWN_MIN_MS: 2000,
+  COOLDOWN_MAX_MS: 6000,
   PARALLEL_INTERVAL: { 1: [4000, 6000], 2: [5000, 7000], 3: [6000, 8000], 4: [6000, 8000] },
-  COLLECT_CAP_PER_SEARCH: 225,    // 单个关键词最多收这么多就停（配合 10~15 页，约15/页）
-  // 召回到这么多个岗位就够了，不再往下翻。
-  // 依据：一天只投 75 个，审核池 120 个，召回 400 个足够筛选后还有富余。
-  // 不做成用户可调项：多召回的部分最后都会被截断丢掉，只是徒增请求量和风控风险。
-  RECALL_TARGET_JOBS: 400,
+  COLLECT_CAP_PER_SEARCH: 450,    // 单个「关键词×城市」最多收这么多（≈BOSS 单搜天花板 ~300-450）
+  // 堆量模式：先把池子搞大(单搜到顶 + 多词×多城叠加)，再靠精筛收窄到 ~75。
+  RECALL_TARGET_JOBS: 800,
   // 列表翻页间隔。固定节奏像机器、容易被判频繁，改成区间随机抖动，更像人、更不触限流。
   // 实测 1.2 秒几页就被封；拉到 4.5~7 秒随机，慢一点但稳。
   PAGE_REQUEST_INTERVAL_MS: 3500,       // 兜底/非翻页场景仍用它
@@ -147,7 +148,7 @@ const CONFIG = {
   ROUND_INTERVAL_MS: 6000,        // 换一组搜索条件之间的停顿
   MAX_PARALLEL_TABS: 4,           // 并行搜索的标签页上限（对齐即投：一城一页并行）
   CANDIDATE_CAP: 300,             // 廉价过滤后送去拉 JD 的上限
-  REVIEW_POOL_SIZE: 200,          // 结果列表最多显示这么多，别把搜到的截断在几十个
+  REVIEW_POOL_SIZE: 800,          // 结果列表最多显示这么多（堆量模式，配合精筛收窄）
   CHANNEL_A_MAX_COMPANIES: 30,    // 超过此数从「公司页遍历」切到「词搜+本地过滤」
   BACKFILL_MIN_JOBS: 3,           // 某公司召回少于此数则追加补漏
 

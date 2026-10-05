@@ -66,6 +66,48 @@ const Collector = {
       : { ok: false, reason: 'no_template_after_search', url: '', debugUrls: dbg };
   },
 
+  /**
+   * 从搜索结果页的 DOM 里读公司 brandId：扫所有 /gongsi/{brandId}.html 链接，投票取最多的。
+   * 搜「公司名」时首屏结果基本都是这家公司，占多数的那个 brandId 就是它。
+   * 走 DOM 不走签名接口，所以后台标签也能用、能并行。
+   */
+  readBrandFromSearchDom(names) {
+    const bidOf = (href) => { const m = (href || '').match(/gongsi\/(?:job\/)?([^.?\/]+)\.html/); return (m && m[1]) || null; };
+    const want = (names || []).map((s) => String(s || '').toLowerCase()).filter(Boolean);
+    const cardSels = ['.job-card-wrapper', 'li.job-card-wrapper', '.job-card-box', 'ul.job-list-box > li', '.search-job-result li', '[class*="job-card"]'];
+    let cards = [];
+    for (const sel of cardSels) { cards = document.querySelectorAll(sel); if (cards.length) break; }
+    const nameOf = (c) => {
+      const n = c.querySelector('.company-name, [class*="company-name"], .company-info .name, .name');
+      return String((n ? n.textContent : c.textContent) || '').toLowerCase();
+    };
+    // 1. 【按公司名匹配】：取第一张「公司名含搜索词」的卡的公司链接。
+    //    排除底部「推荐的别家公司」（名字不含搜索词），小公司也能精准进自己的页面。
+    if (want.length) {
+      for (const c of cards) {
+        if (!want.some((w) => nameOf(c).includes(w))) continue;
+        const a = c.querySelector('a[href*="/gongsi/"]');
+        const bid = a && bidOf(a.getAttribute('href'));
+        if (bid) return { ok: true, brandId: bid, from: 'name-match' };
+      }
+    }
+    // 2. 退：第一张有公司链接的卡
+    for (const c of cards) {
+      const a = c.querySelector('a[href*="/gongsi/"]');
+      const bid = a && bidOf(a.getAttribute('href'));
+      if (bid) return { ok: true, brandId: bid, from: 'first-card' };
+    }
+    // 3. 兜底：全页 /gongsi/ 链接投票取最多
+    const votes = new Map();
+    for (const a of document.querySelectorAll('a[href*="/gongsi/"]')) {
+      const bid = bidOf(a.getAttribute('href'));
+      if (bid) votes.set(bid, (votes.get(bid) || 0) + 1);
+    }
+    if (!votes.size) return { ok: true, brandId: null };
+    const top = [...votes.entries()].sort((a, b) => b[1] - a[1])[0];
+    return { ok: true, brandId: top[0], from: 'vote' };
+  },
+
   /** 读嗅探器记录的最近 /wapi/ 请求 URL（调试用）*/
   getDebugUrls() {
     try { return JSON.parse(document.documentElement.getAttribute('data-jt-debug-urls') || '[]'); } catch (e) { return []; }

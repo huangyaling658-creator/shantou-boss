@@ -1,76 +1,119 @@
 # 开发交接文档（接手先读这份）
 
-> 这份文档补充 `README.md`。README 里「当前进度」的里程碑表和「三个关键设计」第 3 条已过时（见下），以**本文档**为准。
-> 面向「换一台机器 / 换一个工具（Cursor、Windsurf、workbuddy 等）继续开发」的人。
+> 面向「换一台机器 / 换一个 AI agent 继续开发」的人。补充 `README.md`（README 的里程碑表与「三个关键设计」第 3 条已过时，以本文档为准）。
+> 最后大改：精投改成「全局行为预算 + 一条龙」模型，海投改「堆量」。下面是**当前真实状态 + 待办/已知问题**。
 
 ---
 
-## 1. 这是什么、现在到哪了
+## 0. 一句话现状
 
-闪投 = BOSS 直聘的 Chrome MV3 扩展，侧边栏里跑。两种模式：
+闪投 = BOSS 直聘 Chrome MV3 扩展（侧边栏）。两模式：
+- **海投（position）**：按岗位词全网搜，走**签名 JSON 接口**（collectPages），堆量模式。
+- **精投（company）**：锁定几家公司，进**每家公司招聘页读 DOM 卡**收岗位，全局行为节流。
 
-- **海投（position）**：按岗位关键词，多城市并行搜，走 BOSS 的搜索接口（签名请求复放）。
-- **精投（company）**：锁定几家目标公司，进每家公司自己的招聘页读岗位。**绝不全网搜**（搜公司名是全文检索，会带进别家公司）。
+全链路可跑：搜索召回 → 就地生成招呼语 → 投递。核心精力都花在**精投的可靠性 + 节流**上。
 
-全链路已打通：**搜索召回 → （就地）生成招呼语 → 投递发送**，都能跑。不是 README 里说的「M1-M4 待开始」，那表是早期的。
-
-### ⚠️ 当前最大的未解问题（接手优先看这个）
-
-**精投经常「已收 0 个」。** 现象：4 家公司并行，第一家整轮跑完一个岗位都没收到。
-
-- 判断依据：进度条的「已收 N 个」最后停在多少。
-  - 几百 → 后台读卡正常，只是翻太多页（上「自适应早停」：连续两页没新岗位就收手）。
-  - **一直是 0 或个位数 → 后台标签根本没渲染出岗位卡片**（最可能就是这个）。
-- 根因假设：精投阶段 B 用 `chrome.tabs.create({ active:false })` 开**后台标签**读公司页的 DOM 卡片。但 Chrome 对后台标签有引擎级节流，公司页靠 AJAX 渲染岗位列表，后台可能压根不渲染 → `collectCompanyJobsFromDom` 读到 0 张卡 → 15 页全在空等超时 → 又慢又收 0。
-- **下一步方向**：把阶段 B 的「后台并行」改成**前台轮转**——一次只把一家公司的标签切到前台让它真加载出卡，收完再切下一家。慢一点，但能真收到。改之前先用「已收数字」确认确实是这个分支。
+`secrets.js`（通义千问 key）走 `.gitignore`，各人 `cp src/shared/secrets.example.js src/shared/secrets.js` 填自己的。
 
 ---
 
-## 2. 架构：三个 world 怎么协作
+## 1. 精投现在怎么工作（重点，最近全重写过）
 
-扩展没 cookie 的那半边（Service Worker）负责编排，需要登录态的动作全委托到页面里执行。
+**入口**：`service-worker.js` 的 `augmentFromCompanyPages(merged, config, onProgress)`。
 
-```
-panel（侧边栏 UI） ──消息──> service-worker（编排中枢，无 cookie）
-                                  │ 用 chrome.tabs.sendMessage 委托
-                                  v
-   页面里：  content.js（ISOLATED world，消息路由）
-             collector.js（ISOLATED world，复放请求 / 读 DOM 卡 / 拉 JD）
-             sniffer.js（MAIN world，hook 页面自身 fetch/XHR 捕请求模板）
-```
+### 1.1 搜索时长与行为预算
+- 设置齿轮里有「搜索时长」拉杆：**3~30 分钟**，存 `chrome.storage['jt:searchMinutes']`，默认 5。
+- 后台：`taskTimeoutMs = 分钟×60000`（时间硬上限）；`actionsBudget = 分钟×10`（≈ 每分钟 10 个行为，因为全局每 ~6 秒一个行为）。
 
-- **MAIN ↔ ISOLATED 只能 postMessage 通信**。签名请求必须在 MAIN world 用页面包装过的 `window.fetch` 发（带齐 BOSS 的签名头），ISOLATED 的裸 fetch 会被拒（`code:19`）。
-- **嗅探器按「种类」分开存模板**（`data-jt-joblist-req-search` / `-company` / `-recommend`）。曾经 search 模板覆盖 company 模板，导致精投搜出全站结果，务必保持分开。
+### 1.2 全局行为闸（turnGate）——节流核心
+- **全局每 4~8 秒随机才放行一个「翻页行为」**（读一页 = 一个行为），用「预约下一个时间槽」(`nextTurnAt`) 保证并发的页面依次拿槽（先到先得≈轮流派发），不会一起放行。
+- 任意时刻只有一个请求在飞、均匀无突刺，这是躲限流(code:37)的关键。
+- `actionsDone` 每放行一次 +1；进度条 % = `actionsDone / actionsBudget`（面板不显示数字，只显示 %）。
+- 到 `taskDeadline`（时间上限）或全部收完就停。
 
-### 几个「别改坏」的设计
-- **SW 不用 module 模式**（manifest 没有 `"type":"module"`），为的是 `importScripts()` 跟 content script 共用同一份 `constants.js`，常量只有一份。
-- **不自己拼搜索 URL**：BOSS 的参数（securityId 等）无法稳定复现，拼了当天能跑、改版即静默失效。所以嗅探真实请求当模板，只换 `page`/`query`。
-- **海投直调接口**（后台标签不受网络节流，能跑满）；**精投读 DOM 卡**（公司招聘页天然只含本公司，且没有稳定的 JSON 接口可复放）。README 第 3 条只讲了前者，精投是后加的。
+### 1.3 一条龙 per 标签（onePass）
+每家公司一个后台标签，一条龙跑完：
+1. **定位 brandId**（没有 override 时）：开搜索页搜「公司名」，`READ_BRAND_DOM` 从结果页 DOM 读。
+   - **只搜公司名、不带职位/城市筛选**（否则小公司加筛选后搜不出几条，页面被「推荐其他公司」占满，定位投歪）。
+   - **按公司名匹配**：取第一张「公司名含搜寻名/别名」的卡的 `/gongsi/{brandId}` 链接（排除底部推荐的别家）。退：第一张有公司链接的卡 → 全页投票兜底。
+   - 依次试 `[搜寻名, 公司名, ...别名]`，每个读 3 次给异步渲染时间。
+2. **开全新公司页标签**：读到 brandId 后**关搜索标签、`chrome.tabs.create` 开新标签**进 `/gongsi/job/{brandId}.html`。
+   - ⚠️ 不能用 `tabs.update` 同标签导航——BOSS 是 SPA，同源导航 `waitForTabComplete` 会立刻看到旧的 complete 就返回，公司页没真加载完 → 只收到 1 页。这是踩过的坑。
+3. **收职位**：驱动公司页搜索框打岗位词 → `COMPANY_DOM_PAGE` 一页页读卡（每页前过 `turnGate`）。
 
----
+### 1.4 重做（三重保障，行为版）
+`processCompany` 外层：一轮跑完若**这轮用的行为数 ≤ 4**（太快，多半只收到 1 页/定位错）→ **重做**；重做时 `actionsBudget += 10`（给重做腾预算）；**每家最多重做 3 遍**。重做会重新定位，能救偶发的定位歪/渲染慢。
 
-## 3. 本次迭代踩过的坑（都是架构级，别当偶发）
+### 1.5 开页节流 + 关标签
+- `openGate`：每开一个分页全局隔 1~2 秒（预约槽，并发也真错开）。
+- `closeSlot`：用完的标签**延迟 1~3 秒随机再删**，且**后台异步不阻塞**（下一家不等删完就开始）。海投同样。
 
-1. **MV3 Service Worker 空闲 ~30 秒就被回收。** 长任务（召回/招呼语/投递）里只要有一段不发消息超过 30 秒，SW 就被杀，所有在途 promise 全死、进度永远卡住。
-   - **铁律：每一个几分钟的长任务都必须 `startKeepAlive()`/`stopKeepAlive()` 包住**（alarms 每 30 秒顶一次），并在静默段（如后台导航等待）补发心跳广播。`runRecall`/`runGreeting`/`runSend` 现在都挂了——加新的长任务记得照做。
-2. **长任务不能 `await` 整轮再响应。** `START_RECALL`/`START_GREETING`/`START_SEND` 都是**发令即返回 `{started:true}`**，进度和收尾全靠 `TASK_PROGRESS` 广播。谁要是写成 `await run...()` 再 sendResponse，通道撑不过几分钟会被判「message channel closed」，面板误报「出错了」而后台其实在跑。
-3. **精投要先把公司名翻译成 brandId**（BOSS 内部加密 ID，如 `64bf...4F1A~`，尾部 `~` 不能被 URL 编码）。brandId 解析走**前台**搜索页（签名 AJAX 后台会被 `code:19` 拒）；拿到后才进 `/gongsi/job/{brandId}.html` 公司招聘页读卡。
-4. **职位筛选用三级叶子 code**（产品经理=110101），不是类目组 code（1000160，会返回 0）。完整树在 `src/data/position-tree.js`。
-5. **时间账**：精投总耗时 ≈ 阶段A串行 + ⌈公司数/4⌉ × 岗位词数 × 每单位(约 15 页 × 6~8 秒)。并行只切「公司」这根轴（最多 4 家），切不动「每词翻 15 页」这个地板。真要提速得砍单元成本（自适应早停），不是加并行。
+### 1.6 手动覆盖（异常公司那行）
+结果页「搜索过程与结果」折叠区里，异常/没定位到的公司下方有一行 `搜寻名：xxx [更改] [改网址]`（都要密码 **012026**）：
+- **更改** → 改**搜寻名**（`S.searchОverrides[公司名]→中文名`，存 `jt:searchOverrides`）。后台定位优先用它。
+- **改网址** → 贴这家 BOSS 公司主页网址，抽出 brandId（`S.brandOverrides`，存 `jt:brandOverrides`）。**最优先、直接用、跳过定位**（救 vivo/OPPO 这种搜出来第一条是乱公司的）。
 
----
-
-## 4. 跑起来 / 调试
-
-1. `cp src/shared/secrets.example.js src/shared/secrets.js`，填入自己的**通义千问 DashScope** key（`secrets.js` 已在 `.gitignore`，不进仓库，各人填各人的）。
-2. Chrome → `chrome://extensions/` → 开发者模式 → 「加载已解压的扩展程序」选本目录。
-3. 登录 BOSS 直聘，打开侧边栏用。
-4. **改完代码**：在扩展管理页点「重新加载」。
-5. **看后台日志**：扩展卡片上点 service worker 的「检查视图」，Console 里搜 `[闪投]`。精投每家每词会打 `计时(ms) brandId= 进页= 驱动框= 翻页=`，用来定位慢在哪一段。
-6. 改完习惯性全量语法自查：`for f in $(find src -name '*.js'); do node --check "$f"; done`
+### 1.7 公司库的「显示名 vs 搜寻名」
+`src/data/companies.js`：`n`=显示名（给用户看，品牌名）；`s`=搜寻名（后台定位用，必须 BOSS 上收得住）；`a`=别名。目前只给 **智谱AI(s=智谱华章)**、**DeepSeek(s=深度求索)** 配了 `s`。**别的公司没配，别乱改没反馈过的公司。**
 
 ---
 
-## 5. 硬约束（见 README「硬约束」表）
+## 2. 海投现在怎么工作
 
-拉 JD ≥ 3000ms（1.5s 触发软封 `code:37`）、单批 75、单日 150、分数地板 60、禁投 0-7 点。风控第一层是弹验证码不是封号，探到边界即停、不硬顶。当前自用。
+走签名 JSON 接口（`collector.js` 的 `collectPages`），**堆量模式**：
+- `MAX_PAGES: 15`、`COLLECT_CAP_PER_SEARCH: 450`、`REVIEW_POOL_SIZE: 800`（constants.js）。
+- **关掉了相关度早停闸门**（`collectOnCity` 里 `relevance = null`），一路翻到 BOSS 没下一页为止，相关度交给结果页精筛。
+- **单搜天花板**：一个「词×城」BOSS 翻到 ~300 就没了。要堆到 800 得**多词×多城**叠加。
+- 多城并行（`MAX_PARALLEL_TABS: 4`）——注意并行翻页仍可能突刺，海投**没上**精投那套全局行为闸（见待办）。
+
+---
+
+## 3. 结果页 / UI 现状
+
+- **投递模式**：海投 / 精投 切换。
+- **搜索时长**：齿轮 → 设置抽屉 → 拉杆（3~30 分钟）。
+- **开始搜索**：单按钮（之前试过浅搜/深搜双按钮，已撤）。进度条 % = 行为/预算，文字 `X% · 约还需 N 分钟 · 已收 M 个`，带实时计时「用时 M:SS」，完成显示「本次搜索用时」。
+- **登录失效检测**：精投若「已定位的公司几乎都只 1 页」→ 顶部橙条提示重新登录 BOSS（`maybeWarnLogin`）。本质是没登录时公司页只给默认几个。
+- **搜索过程与结果**（折叠区，`#search-detail-sec`）：搜索中默认展开、结束自动收起。内含：
+  - **每家公司状态清单**（`renderCompanyStatus`）：定位中 • / 搜职位中 •(带实时页数「第 N 页」) / 已完成 ✓(显示「N个·P页·Xs」) / 没定位到 ✗。
+  - **异常标注**：收到 0 个 → ❗；翻页数 < 本轮平均 50% → ⚠（主指标是**翻页数/工作步数**，不是时长——时长受冷却影响不稳）。
+  - **漏斗明细**。
+- **岗位列表**：按公司分组，**默认全部收起**，点公司名展开。
+- **精筛**：岗位词拆子词（AI产品经理→AI产品/产品经理/AI经理）或门 + 「其他」桶（默认不点）+ 每标签标数量。
+- **75保护**（精筛区开关，默认开）：全选/自动全选封顶 75（`SOFT_BATCH_LIMIT`），关掉可超过。
+- **导航箭头**：表头 `[←] 闪投 [→]`，→ 在条件页有结果时回结果页。
+- **停止**：只停不重置，点击立刻刷新；回结果页入口（`hasResult`）。
+
+---
+
+## 4. 架构要点（别改坏）
+
+- **三个 world**：panel ↔ service-worker（无 cookie，编排）↔ content.js(ISOLATED，消息路由) / collector.js(ISOLATED，复放请求/读DOM) / sniffer.js(MAIN，hook 页面 fetch 捕请求模板)。MAIN↔ISOLATED 只能 postMessage。
+- **SW 不用 module 模式**（`importScripts` 共用一份 constants.js）。
+- **长任务发令即返回**：`START_RECALL`/`START_GREETING`/`START_SEND` 立刻回 `{started:true}`，进度/收尾全靠 `TASK_PROGRESS` 广播。谁写成 `await run...()` 再响应，会因 SW 被回收或通道关闭卡死面板。
+- **SW 保活**：长任务期间 `startKeepAlive()`/`stopKeepAlive()`（alarms 每 30 秒），否则 MV3 的 SW 空闲 ~30 秒被回收、任务卡住。`runRecall`/`runGreeting`/`runSend` 都挂了。
+- **硬约束**（constants.js / README）：拉 JD ≥3000ms、单批 75、单日 150、分数地板 60、禁投 0-7 点。
+
+---
+
+## 5. ⚠️ 待办 / 已知问题（接手重点看这里）
+
+1. **海投没上全局行为闸**：精投已是「全局每 4-8 秒一个行为」最安全，海投还是多城并行按页间隔，堆量(15页)后并行突刺风险更高。**跑海投时留意 Console 有没有 `code:37`**；真冒了就把海投多城改串行、或也接 turnGate。
+2. **后台标签读卡/定位依赖 BOSS 登录**：没登录时公司页只给默认几个（已加登录检测提示）。确保 BOSS 已登录再测。
+3. **小公司定位仍可能不准**：vivo/OPPO 这种品牌名，搜出来第一条可能是经销商/同名公司。已有「按公司名匹配 + 改搜寻名 + 改网址」三道兜底；若常见某家不准，给它配 `s`（搜寻名）或让用户改网址。
+4. **「页数 < 平均 50%」的异常标注会误报小公司**：智谱这种真·小公司岗位就少(1-2页)，会被标 ⚠。这是提示不是错误，用户自行判断；可考虑加「绝对下限」豁免。
+5. **进度 % 的分母会随重做增长**（actionsBudget += 10），% 可能中途略回跳，正常。
+6. **ETA/EST 相关函数（estimateRangeSec 等）已基本废弃**（不显示预估了），`renderEtaHint` 成了死代码，可清理。
+7. **多主体公司未做**：京东=京东集团+京东物流 这类「一家拆多个招聘主体」还没做（之前讨论过 `e` 字段方案，未实现）。
+8. **浏览器自检受阻**：开发时想用 Chrome 扩展看 BOSS 真实页面结构（卡片/翻页选择器），但本会话 claude-in-chrome 没连上、内置浏览器没登录 BOSS。要核对选择器得在登录的环境里看。
+
+---
+
+## 6. 跑起来 / 调试
+
+1. `cp src/shared/secrets.example.js src/shared/secrets.js` 填通义千问 key。
+2. Chrome → `chrome://extensions/` → 开发者模式 → 加载已解压的扩展程序选本目录。
+3. **登录 BOSS 直聘**，打开侧边栏。
+4. 改完代码点「重新加载」。看后台日志：扩展卡片 → service worker「检查视图」→ Console 搜 `[闪投]`。
+5. 改完全量语法自查：`for f in $(find src -name '*.js'); do node --check "$f"; done`
+6. **风险**：抓取+自动投递违反 BOSS 用户协议，账号有被限流风险（第一层是验证码不是封号）。自用。

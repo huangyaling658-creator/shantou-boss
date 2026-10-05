@@ -49,6 +49,8 @@
       return { ok: true, brands };
     },
 
+    [MSG.READ_BRAND_DOM]: async (payload) => Collector.readBrandFromSearchDom(payload && payload.names),
+
     [MSG.COMPANY_BOX_SEARCH]: async (payload) => {
       return await Collector.driveCompanyBoxSearch(payload.keyword || '');
     },

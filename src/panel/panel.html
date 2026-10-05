@@ -43,6 +43,22 @@
   </div>
 </div>
 
+<!-- 设置（半屏抽屉）-->
+<div class="drawer-mask" id="settings-mask" hidden></div>
+<div class="drawer" id="settings-drawer" hidden>
+  <div class="drawer-head">
+    <span>设置</span>
+    <button id="settings-close" class="icon-btn" aria-label="关闭">✕</button>
+  </div>
+  <div class="drawer-body">
+    <div class="set-row">
+      <div class="set-label">搜索时长 <b id="dur-val">5</b> 分钟</div>
+      <input type="range" id="dur-range" min="3" max="30" step="1" value="5">
+      <div class="set-scale"><span>3</span><span>30</span></div>
+    </div>
+  </div>
+</div>
+
 <!-- ══════════════ 条件设置 ══════════════ -->
 <div class="screen on" id="screen-config">
 
@@ -121,13 +137,23 @@
     <div class="progress-phase" id="search-phase"></div>
     <div class="progress-bar"><div class="progress-fill" id="search-fill"></div></div>
     <div class="progress-detail" id="search-detail"></div>
+    <div class="progress-timer" id="search-timer"></div>
   </div>
   <!-- 投递中：原地在岗位列表上方显示进度，不切走页面（对齐即投）-->
   <div class="progress" id="send-banner" hidden>
     <div class="progress-bar"><div class="progress-fill" id="sendbar-fill"></div></div>
     <div class="progress-phase" id="sendbar-phase"></div>
   </div>
-  <div id="funnel" class="funnel" hidden></div>
+  <div id="login-warn" class="login-warn" hidden>⚠ 结果异常偏少（每家基本只有 1 页）。很可能是 BOSS 直聘登录已失效，请在 BOSS 页面重新登录后再搜一次。</div>
+
+  <!-- 搜索过程与结果（默认折叠，手动展开）-->
+  <section class="fold-sec" id="search-detail-sec" hidden>
+    <div class="fold-head" id="sd-head"><span class="fold-arrow">▸</span> 搜索过程与结果</div>
+    <div class="fold-body" id="sd-body" hidden>
+      <div class="company-status" id="company-status"></div>
+      <div id="funnel" class="funnel"></div>
+    </div>
+  </section>
 
   <div id="result-body" hidden>
     <!-- 图片简历 -->
@@ -148,7 +174,9 @@
 
     <!-- 结果页精筛：按岗位词子词(或门)在收到的结果里再筛一道 -->
     <section class="sec" id="refine-sec" hidden>
-      <h2 class="jobs-head">精筛</h2>
+      <h2 class="jobs-head">精筛
+        <label class="protect75" title="单批最多选 75 个，关掉可超过"><input type="checkbox" id="protect-75" checked> 75保护</label>
+      </h2>
       <div class="pills" id="refine-chips"></div>
     </section>
 
@@ -192,7 +220,7 @@
     <span id="action-count" class="action-count" hidden></span>
     <button id="btn-reset" class="btn ghost">重置</button>
     <button id="btn-action" class="btn primary">开始搜索</button>
-    <span id="eta-hint" class="eta-hint" hidden></span>
+    <button id="btn-action2" class="btn primary" hidden>深搜10min</button>
   </div>
 </footer>
 

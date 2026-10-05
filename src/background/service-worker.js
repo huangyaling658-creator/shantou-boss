@@ -171,9 +171,9 @@ async function collectOnCity(keywords, cityCode, filters, onProgress, gateTokens
       // BOSS 的推荐填充会无视职位类型筛选照样塞非产品岗，闸门就靠家族根词把它们挡住：
       // 「AI产品专家」「AI策略产品」含「产品」→ 留；「大客户代表」「机械工程师」→ 停翻。
       // 用家族根词而非完整岗位词，避免因「公司名/岗位名不是搜索词原文」误停。
-      const relevance = (gateTokens && gateTokens.length)
-        ? { field: 'jobName', tokens: gateTokens }
-        : null;
+      // 堆量模式：关掉「跑偏就提前停翻」的闸门，一路翻到 BOSS 没有下一页/到量上限为止。
+      // 相关度交给结果页的精筛去筛（源头已有职位类型 code 过滤，大体不跑太偏）。
+      const relevance = null;
 
       let res;
       try {
@@ -196,8 +196,9 @@ async function collectOnCity(keywords, cityCode, filters, onProgress, gateTokens
   } catch (e) {
     console.log('[闪投] 采集异常:', String(e.message || e));
     return { jobs: [...merged.values()], stoppedBy: 'error:' + String(e.message || e).slice(0, 40), source };
+  } finally {
+    setTimeout(() => chrome.tabs.remove(tabId).catch(() => {}), U.randInt(1000, 3000));   // 用完即删，但隔 1~3 秒再删
   }
-  // 采完不关标签页：全部保留，你想看就切过去。
 }
 
 /**
@@ -257,51 +258,55 @@ async function augmentFromCompanyPages(merged, config, onProgress) {
   const queries = posWords.length ? posWords : [''];   // 没填岗位词就拉这家公司全部岗
 
   const diag = [];
+  const brandMiss = [];   // 没解析到 brandId 的公司名，实时+最终都报给用户
   augmentFromCompanyPages._diag = diag;
+  augmentFromCompanyPages._brandMiss = brandMiss;
 
-  // 池子大小：同时在采几家。多出来的排队，谁先收完谁补位。翻页节拍改由全局冷却闸统一掐。
+  // 要开多少个分页：公司数，封顶 8。这个 P 同时是冷却公式里的 N（固定，不随收完变）。
   const P = Math.max(1, Math.min(CONFIG.PARALLEL_COMPANIES || 2, companies.length));
+
+  // 开页闸：每开一个分页全局至少隔 1~2 秒随机，轮流开、不突刺。
+  // 用「预约下一个时间槽」而不是读旧时间戳——否则并行的 worker 会都读到同一个旧值、
+  // 都只等一下然后一起开（= 没错开）。预约法保证并发调用拿到依次往后 1~2 秒的槽。
+  let nextOpenAt = 0;
+  const openGate = async () => {
+    const now = Date.now();
+    const at = Math.max(now, nextOpenAt);
+    nextOpenAt = at + U.randInt(1000, 2000);   // 占住这个槽，下一个往后排
+    if (at > now) await U.sleep(at - now);
+  };
 
   // 进度：一个「公司×词」是一个单元，总数 = 公司数 × 词数（和面板预估一致）
   const unitTotal = companies.length * queries.length;
   let unitDone = 0;
   let added = 0;
 
-  // ── 阶段 A：先在前台标签把每家 brandId 解析出来（搜索页要加载岗位走签名 AJAX，
-  //    后台标签可能被 code_19 拒，所以 brandId 解析放前台可靠做）──
-  const mainTab = await ensureBossTab({ activate: true });
-  const brandList = [];   // [{company, brandId}]
+  // 每个分页「一条龙」：先搜公司名读自己的 brandId → 直接进公司页搜职位（都在 processCompany 里）。
+  // 这里只预取「已搜到的岗位」里能投票出的 brandId（精投通常没有，为 null），其余各标签现搜。
+  // 搜索时长：设置里拉杆的分钟数（3~30），决定时间上限 + 行为预算（每分钟≈10个行为）
+  const mins = Math.min(30, Math.max(3, config.searchMinutes || 5));
+  const taskTimeoutMs = mins * 60000;
+  const taskDeadline = (state.task.startedAt || Date.now()) + taskTimeoutMs;
   const jobs = [...merged.values()];
-  for (const c of companies) {
-    if (state.task.phase === 'aborted') break;
+  const sOver = config.searchOverrides || {};   // 用户手动改的「搜寻名」（公司名→中文搜寻名）
+  const bOver = config.brandOverrides || {};     // 用户贴的公司主页网址抽出的 brandId（公司名→brandId）
+  const targets = companies.map((c) => {
     const keys = [c.name, ...(c.aliases || [])].map((s) => String(s).toLowerCase());
     const votes = new Map();
     for (const j of jobs) {
       const cn = (j.companyName || '').toLowerCase();
       if (j.companyId && keys.some((k) => k && cn.includes(k))) votes.set(j.companyId, (votes.get(j.companyId) || 0) + 1);
     }
-    let brandId = votes.size ? [...votes.entries()].sort((a, b) => b[1] - a[1])[0][0] : null;
-    const t0 = performance.now();
-    if (!brandId) brandId = await resolveBrandId(mainTab, c, config.filters || {});
-    const ms = Math.round(performance.now() - t0);
-    if (brandId) { brandList.push({ company: c.name, brandId, msBrand: ms }); }
-    else { console.log('[闪投] brandId 没解析到', c.name); diag.push({ company: c.name, step: 'brandId 没解析到' }); }
-  }
-  if (!brandList.length) return 0;
+    const voted = votes.size ? [...votes.entries()].sort((a, b) => b[1] - a[1])[0][0] : null;
+    // brandId 覆盖（用户贴网址）最优先，直接用、跳过定位；否则靠搜寻名去搜
+    return { company: c.name, searchName: sOver[c.name] || c.search || c.name, aliases: c.aliases || [], brandId: bOver[c.name] || voted };
+  });
 
-  // ── 阶段 B：worker 池(P 家在采) + 全局冷却节拍 ──
-  // 开局 P 家一起收第 1 页；之后全局一条队列，任意两次翻页之间至少隔一个随机冷却时间
-  // (2~6秒，精确到0.01秒)，轮着来：A翻读→冷却→B→冷却→C→D→回A。任意时刻只有一个请求在飞，
-  // 均匀无突刺，这是躲限流最理想的请求形状。谁先收完谁退出，队列里下一家(E/F)立刻补位。
-  const cdLo = CONFIG.COOLDOWN_MIN_MS || 2000;
-  const cdHi = CONFIG.COOLDOWN_MAX_MS || 6000;
-  let lastTurnAt = 0;
-  const cooldown = async () => {
-    const want = Math.round((cdLo + Math.random() * (cdHi - cdLo)) / 10) * 10;   // 0.01秒精度
-    const gap = Date.now() - lastTurnAt;
-    if (lastTurnAt && gap < want) await U.sleep(want - gap);
-    lastTurnAt = Date.now();
-  };
+  // ── 采集：全同步并行，每标签一条龙 ──
+  // 选中的公司（最多 PARALLEL_COMPANIES 家）全部同时开跑，各翻各的。每家翻一页后独立随机睡
+  // [4+N, (4+N)×2] 秒（N=当前还在跑的家数）：并行越多间隔越宽、总速率自己踩刹车；有家收完
+  // N 变小、剩下的自动提速。满 TASK_HARD_TIMEOUT_MS（5 分钟，从任务开始算）就停、把已收的展示。
+  const timeUp = () => Date.now() >= taskDeadline;   // 5 分钟硬封顶（含解析阶段，见上）
   const pagesCap = () => U.randInt(CONFIG.COMPANY_PAGES_MIN || 10, CONFIG.COMPANY_PAGES_MAX || 15);
 
   // 把一页卡入库：全局 merged 去重 + slot 自己的 seen；返回这页给「这家」新增了几个
@@ -315,74 +320,148 @@ async function augmentFromCompanyPages(merged, config, onProgress) {
     }
     return nSlot;
   };
-  const readPage1 = async (slot) => {
-    const q = queries[slot.kwi] || '';
-    if (q) { await askTab(slot.tabId, MSG.COMPANY_BOX_SEARCH, { keyword: q }).catch(() => {}); await U.sleep(800); }
-    const res = await askTab(slot.tabId, MSG.COMPANY_DOM_PAGE, { turnFirst: false }).catch(() => ({ jobs: [], hasNext: false }));
-    slot.lastNew = absorb(slot, res); slot.page = 1; slot.lastHasNext = !!res.hasNext;
-    if (onProgress) onProgress({ company: slot.company, keyword: q, unitDone, unitTotal, collected: merged.size, domPage: 1, domMaxPages: slot.maxPages });
-  };
-  // 开一家：后台标签 → 导航 → 就绪 → 搜词 → 读第 1 页
-  const startSlot = async (c) => {
-    const slot = { company: c.company, brandId: c.brandId, tabId: null, kwi: 0, page: 0, seen: new Set(), maxPages: pagesCap(), lastHasNext: false, lastNew: 0 };
-    const tab = await chrome.tabs.create({ url: BOSS.PAGE.COMPANY_JOBS(c.brandId), active: false });
-    slot.tabId = tab.id;
-    if (onProgress) onProgress({ company: slot.company, keyword: '正在打开公司页', unitDone, unitTotal, collected: merged.size });
-    await waitForTabComplete(slot.tabId);
-    for (let i = 0; i < 20; i++) { await U.sleep(400); if ((await pingTab(slot.tabId)).ok) break; }
-    await U.sleep(1000);
-    await readPage1(slot);
-    return slot;
-  };
   const kwExhausted = (slot) => !slot.lastHasNext || slot.page >= slot.maxPages || slot.lastNew === 0;
-  const nextKeyword = async (slot) => {   // 推进到下一个词；没有更多词返回 false(整家完)
-    slot.kwi++;
-    if (slot.kwi >= queries.length) return false;
-    slot.page = 0; slot.seen = new Set(); slot.maxPages = pagesCap();
-    await readPage1(slot);
-    return true;
+  // 关标签：不秒删，隔 1~3 秒随机再删；而且是后台异步的（不 await），下一家不用等删完就能开始
+  const closeSlot = (slot) => {
+    if (!slot || !slot.tabId) return;
+    const id = slot.tabId;
+    setTimeout(() => chrome.tabs.remove(id).catch(() => {}), U.randInt(1000, 3000));
   };
-  const closeSlot = (slot) => { if (slot && slot.tabId) chrome.tabs.remove(slot.tabId).catch(() => {}); };
+  // 每家公司的实时状态：locating 定位中 / searching 搜职位中 / done 已完成 / miss 没定位到。
+  const statuses = {};
+  const stats = {};   // 每家：{ ms 用时, count 收到数, pages 翻页数 }，完成时用来标异常
+  const live = {};    // 每家实时翻页数（工作步数），搜索中逐页更新给面板看
+  augmentFromCompanyPages._statuses = statuses;
+  augmentFromCompanyPages._stats = stats;
+  const report = (slot, kw) => { if (onProgress) onProgress({ company: slot.company, keyword: kw, unitDone, unitTotal, collected: merged.size, domPage: slot.page, domMaxPages: slot.maxPages, misses: brandMiss.slice(), statuses: { ...statuses }, live: { ...live }, actionsDone, actionsBudget }); };
 
-  const queue = brandList.slice();
-  const active = [];
-  // 开局灌满池子：第 1 页一起收（并发，符合「第一轮 A/B/C/D 一起」）
-  const firstBatch = queue.splice(0, P);
-  const started = await Promise.all(firstBatch.map((c) => startSlot(c).catch((e) => {
-    diag.push({ company: c.company, step: '开页异常:' + String(e.message || e).slice(0, 24) }); return null;
-  })));
-  for (const s of started) if (s) active.push(s);
+  // 全局行为闸（轮流派发）：无论几家在采，全局每 4~8 秒随机才放行一个「翻页行为」。
+  // 5 分钟≈300秒÷6秒均值≈50 个行为，总量有硬顶、均匀无突刺。用「预约下一个时间槽」保证
+  // 并发的页面依次拿到往后排的槽（先到先得≈轮流），而不是一起放行。
+  let activeCount = 0;   // 仅用于显示/参考
+  let nextTurnAt = 0;
+  let actionsDone = 0;   // 已执行的行为数（翻页数），进度% = actionsDone / actionsBudget
+  let actionsBudget = Math.max(1, Math.round(taskTimeoutMs / 6000));   // 浅搜≈50 / 深搜≈100（重做会 +10）
+  const turnGate = async () => {
+    const now = Date.now();
+    const at = Math.max(now, nextTurnAt);
+    nextTurnAt = at + U.randInt(4000, 8000);   // 占住这个槽，下一个往后排 4~8 秒
+    if (at > now) await U.sleep(at - now);
+    actionsDone++;
+  };
+  const stop = () => state.task.phase === 'aborted' || timeUp();
 
-  // 全局轮转
-  let rr = 0, guard = 0;
-  const hardCap = brandList.length * (queries.length || 1) * ((CONFIG.COMPANY_PAGES_MAX || 15) + 3) + 50;
-  while (active.length && state.task.phase !== 'aborted') {
-    if (++guard > hardCap) { console.log('[闪投] 调度器达硬上限，收尾'); break; }
-    const slot = active[rr % active.length];
-    if (kwExhausted(slot)) {
-      unitDone++;   // 这个(公司×词)单元收完
-      diag.push({ company: slot.company, keyword: queries[slot.kwi] || '全部', got: slot.seen.size, source: 'dom-queue' });
-      const more = await nextKeyword(slot);
-      if (!more) {
+  const ready = async (tabId) => {   // 等页面加载 + content script 就绪
+    await waitForTabComplete(tabId);
+    for (let i = 0; i < 20; i++) { await U.sleep(400); if ((await pingTab(tabId)).ok) break; }
+    await U.sleep(1000);
+  };
+
+  // 单次完整跑一家：定位 brandId → 进公司页 → 逐词搜职位。返回 {located, pages}。
+  const onePass = async (t) => {
+    const slot = { company: t.company, brandId: t.brandId, tabId: null, kwi: 0, page: 0, seen: new Set(), maxPages: pagesCap(), lastHasNext: false, lastNew: 0 };
+    let pagesTotal = 0, located = false;
+    activeCount++;
+    try {
+      await openGate();
+      if (stop()) return { located: false, pages: 0 };
+      let brandId = t.brandId;
+      if (!brandId) {
+        statuses[t.company] = 'locating';
+        if (onProgress) onProgress({ company: t.company, keyword: '正在定位公司', unitDone, unitTotal, collected: merged.size, statuses: { ...statuses } });
+        const cands = [...new Set([t.searchName || t.company, t.company, ...(t.aliases || [])].filter(Boolean))].slice(0, 5);
+        for (let ci = 0; ci < cands.length && !brandId && !stop(); ci++) {
+          // 定位只搜公司名、不带职位/城市筛选：否则小公司加了职位筛选后搜不出几条，
+          // 页面被「推荐其他公司」占满，/gongsi/ 投票会投到别家 → 定位到错公司。
+          const url = buildSearchUrl({ query: cands[ci] });
+          if (!slot.tabId) { const tab = await chrome.tabs.create({ url, active: false }); slot.tabId = tab.id; }
+          else { await chrome.tabs.update(slot.tabId, { url }); }
+          await ready(slot.tabId);
+          const names = [t.company, t.searchName, ...(t.aliases || [])].filter(Boolean);   // 按公司名匹配，排除推荐的别家
+          for (let k = 0; k < 3 && !brandId; k++) {
+            const r = await askTab(slot.tabId, MSG.READ_BRAND_DOM, { names }).catch(() => null);
+            brandId = r && r.brandId;
+            if (!brandId) await U.sleep(800);
+          }
+        }
+        if (!brandId) return { located: false, pages: 0 };
+        slot.brandId = brandId;
+        // 读到 brandId 后关搜索标签、开【全新】公司页标签（SPA 同标签导航会半加载，只收 1 页）
         closeSlot(slot);
-        active.splice(active.indexOf(slot), 1);
-        if (queue.length) { const s = await startSlot(queue.shift()).catch(() => null); if (s) active.push(s); }  // E 补位
-        rr = 0;
-      } else { rr++; }
-      if (onProgress) onProgress({ company: slot.company, keyword: '', unitDone, unitTotal, collected: merged.size });
-      continue;
+        const tab = await chrome.tabs.create({ url: BOSS.PAGE.COMPANY_JOBS(brandId), active: false });
+        slot.tabId = tab.id;
+      } else {
+        const tab = await chrome.tabs.create({ url: BOSS.PAGE.COMPANY_JOBS(brandId), active: false });
+        slot.tabId = tab.id;
+      }
+      located = true;
+      statuses[t.company] = 'searching';
+      if (onProgress) onProgress({ company: t.company, keyword: '正在打开公司页', unitDone, unitTotal, collected: merged.size, statuses: { ...statuses } });
+      await ready(slot.tabId);
+
+      for (slot.kwi = 0; slot.kwi < queries.length; slot.kwi++) {
+        if (stop()) break;
+        const q = queries[slot.kwi] || '';
+        slot.page = 0; slot.seen = new Set(); slot.maxPages = pagesCap();
+        if (q) { await askTab(slot.tabId, MSG.COMPANY_BOX_SEARCH, { keyword: q }).catch(() => {}); await U.sleep(800); }
+        await turnGate(); if (stop()) break;   // 读第 1 页也算一个行为，过全局闸
+        let res = await askTab(slot.tabId, MSG.COMPANY_DOM_PAGE, { turnFirst: false }).catch(() => ({ jobs: [], hasNext: false }));
+        slot.lastNew = absorb(slot, res); slot.page = 1; slot.lastHasNext = !!res.hasNext;
+        live[t.company] = pagesTotal + slot.page; report(slot, q);
+        while (!kwExhausted(slot) && !stop()) {
+          await turnGate();   // 翻一页 = 一个行为，全局每 4~8 秒才放行一个
+          if (stop()) break;
+          res = await askTab(slot.tabId, MSG.COMPANY_DOM_PAGE, { turnFirst: true }).catch(() => ({ jobs: [], hasNext: false, turned: false }));
+          slot.page++;
+          slot.lastNew = absorb(slot, res);
+          slot.lastHasNext = res.turned === false ? false : !!res.hasNext;
+          live[t.company] = pagesTotal + slot.page; report(slot, q);
+        }
+        pagesTotal += slot.page;
+        diag.push({ company: slot.company, keyword: q || '全部', got: slot.seen.size, source: 'dom-parallel' });
+      }
+      return { located, pages: pagesTotal };
+    } catch (e) {
+      diag.push({ company: t.company, step: '采集异常:' + String(e.message || e).slice(0, 24) });
+      return { located, pages: pagesTotal };
+    } finally {
+      closeSlot(slot);
+      activeCount = Math.max(0, activeCount - 1);
     }
-    // 正常翻一页：过全局冷却闸 → 翻+读这一页
-    await cooldown();
-    if (state.task.phase === 'aborted') break;
-    const res = await askTab(slot.tabId, MSG.COMPANY_DOM_PAGE, { turnFirst: true }).catch(() => ({ jobs: [], hasNext: false, turned: false }));
-    slot.page++;
-    slot.lastNew = absorb(slot, res);
-    slot.lastHasNext = res.turned === false ? false : !!res.hasNext;
-    if (onProgress) onProgress({ company: slot.company, keyword: queries[slot.kwi] || '', unitDone, unitTotal, collected: merged.size, domPage: slot.page, domMaxPages: slot.maxPages });
-    rr++;
-  }
-  for (const s of active) closeSlot(s);   // 收尾：关掉还开着的标签
+  };
+
+  // 一家公司：跑一次；若这一轮用的行为数 ≤ 4（太快，多半只收到 1 页/定位错）就重做，
+  // 并把全局行为预算 +10 给重做腾空间，每家最多重做 3 遍。
+  const processCompany = async (t) => {
+    if (stop()) return;
+    statuses[t.company] = 'locating';
+    const tStart = Date.now();
+    let located = false, pages = 0, redos = 0;
+    while (!stop()) {
+      const before = actionsDone;
+      const r = await onePass(t);
+      const passActions = actionsDone - before;
+      located = located || r.located;
+      pages = Math.max(pages, r.pages);
+      if (passActions <= 4 && redos < 3 && !stop()) {   // 4 个行为内就完成 → 重做
+        redos++;
+        actionsBudget += 10;   // 剩余行为数 +10，给重做腾空间
+        continue;
+      }
+      break;
+    }
+    if (located) { statuses[t.company] = 'done'; }
+    else { statuses[t.company] = 'miss'; if (!brandMiss.includes(t.company)) brandMiss.push(t.company); console.log('[闪投] 没定位到', t.company); diag.push({ company: t.company, step: '没定位到' }); }
+    unitDone += Math.max(1, queries.length);
+    const count = [...merged.values()].filter((j) => j.companyName === t.company).length;
+    stats[t.company] = { ms: Date.now() - tStart, count, pages };
+    if (onProgress) onProgress({ company: t.company, keyword: '', unitDone, unitTotal, collected: merged.size, misses: brandMiss.slice(), statuses: { ...statuses }, stats: { ...stats }, actionsDone, actionsBudget });
+  };
+
+  // 并行池：最多 P 个分页同时一条龙，一个收完就从队列拉下一家顶上
+  const queue = targets.slice();
+  const worker = async () => { while (queue.length && !stop()) { const t = queue.shift(); if (t) await processCompany(t); } };
+  await Promise.all(Array.from({ length: P }, () => worker()));
   return added;
 }
 
@@ -674,6 +753,8 @@ async function runRecall(config = {}) {
               ...state.task.progress,
               keyword: `${p.company}·${p.keyword || '全部'}`, collected: merged.size,
               unitDone: p.unitDone, unitTotal: p.unitTotal, domPage: p.domPage || 0,   // 精投进度：已完成单元 + 当前单元页进度
+              companyStatus: p.statuses || {}, brandMiss: p.misses || [], companyStats: p.stats || {}, companyLive: p.live || {},   // 每家状态 + 定位失败 + 用时/数量 + 实时页数
+              actionsDone: p.actionsDone || 0, actionsBudget: p.actionsBudget || 0,   // 行为进度 x/50
             },
           });
         });
@@ -820,6 +901,10 @@ async function runRecall(config = {}) {
         collected: jobs.length,
         newJobs: fresh.length,
         dupJobs: dupSent + dupFp,
+        // 完成后仍带上每家公司的最终状态 + 没定位到名单 + 用时/数量，否则清单会全显示「未搜到」
+        companyStatus: augmentFromCompanyPages._statuses || (state.task.progress || {}).companyStatus || {},
+        brandMiss: augmentFromCompanyPages._brandMiss || (state.task.progress || {}).brandMiss || [],
+        companyStats: augmentFromCompanyPages._stats || (state.task.progress || {}).companyStats || {},
       },
     });
 

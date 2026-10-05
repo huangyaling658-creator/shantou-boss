@@ -67,6 +67,11 @@ const S = {
   globalGreet: '',
   jobGreet: {},
   refineTerms: [],       // [{term, on}] 按岗位词拆出的子词，点亮的是或门条件
+  protect75: true,       // 75保护：自动全选封顶在单批上限(75)，默认开；关掉才能选超过
+  searchDetailOpen: false, // 「搜索过程与结果」折叠区，默认折叠
+  searchOverrides: {},   // 用户手动改过的「搜寻名」（公司名→中文搜寻名），下次搜这家用它去定位
+  brandOverrides: {},    // 用户贴公司主页网址抽出的 brandId（公司名→brandId），最优先、跳过定位
+  searchMinutes: 5,      // 搜索时长(分钟)，设置里拉杆调，3~30
 };
 
 const HOT_CITIES = [
@@ -364,7 +369,7 @@ function renderCompanies(q = '') {
       row.appendChild(makePill(c.n, S.companies.some((x) => x.name === c.n), () => {
         const i = S.companies.findIndex((x) => x.name === c.n);
         if (i >= 0) S.companies.splice(i, 1);
-        else S.companies.push({ name: c.n, aliases: c.a });
+        else S.companies.push({ name: c.n, aliases: c.a, search: c.s || c.n });
         renderCompanies($('company-search').value);
         renderCompanyChips();
         saveConfig();
@@ -904,7 +909,7 @@ function updateAction() {
   if (S.busy || S.sending) return;   // 投递进行中/暂停中由 enterSendingBar 管按钮
 
   reset.hidden = false;
-  renderEtaHint();
+  $('btn-action2').hidden = true;   // 不再用双按钮，时长在设置里调
 
   if (S.screen === 'config') {
     // 广撒网必须有岗位词；锁定公司必须有公司
@@ -963,6 +968,7 @@ function stopSearch() {
   S.busy = false;
   S.searchStopped = true;
   S.hasResult = true;                   // 保住「回结果页」入口，哪怕收到 0 个
+  finalizeSearchTimer();                // 停表，显示用到停止为止的时间
   $('search-phase').textContent = '已停止';
   $('btn-reset').textContent = '重置';
   $('btn-action').disabled = false;
@@ -994,7 +1000,7 @@ function fullReset() {
 $('btn-action').addEventListener('click', () => {
   // 投递进行中：按钮是「停止发送 / 继续发送」，优先于按屏幕路由
   if (S.sending) return S.sendPaused ? resumeSending() : pauseSending();
-  if (S.screen === 'config') return runSearch();
+  if (S.screen === 'config') return runSearch();   // 时长按设置里的分钟数
   if (S.screen === 'result') {
     if (S.greeted) return runSend();                        // AI 已生成 → 投递
     if (S.greetMode === 'custom') return runSendFromResult(); // 自定义 → 落文案后投递
@@ -1003,6 +1009,11 @@ $('btn-action').addEventListener('click', () => {
   if (S.screen === 'greeting') return runSend();
   // 投递完成屏：点「完成」收尾
   if (S.screen === 'send') return finishBatch();
+});
+
+// 深搜 10min（条件页专用）
+$('btn-action2').addEventListener('click', () => {
+  if (S.screen === 'config' && !$('btn-action2').disabled) runSearch('deep');
 });
 
 /**
@@ -1086,8 +1097,12 @@ async function runSearch() {
   S.searchStopped = false;   // 新一轮搜索，清掉上一轮的停止标记
   S.hasResult = false;       // 新一轮，旧结果入口先撤
   showScreen('result');
+  startSearchTimer();        // 开表：实时走时
   $('search-progress').hidden = false;
-  $('funnel').hidden = true;
+  $('funnel').hidden = true; $('funnel').innerHTML = '';
+  $('company-status').innerHTML = '';
+  $('login-warn').hidden = true;
+  S.searchDetailOpen = true; updateSearchDetailSec();   // 搜索中默认展开，结束后自动收起
   $('job-list').innerHTML = '';
   $('result-body').hidden = true;
   $('search-empty').hidden = true;
@@ -1135,6 +1150,9 @@ async function runSearch() {
       cities: S.cities.map((c) => c.code),
       cityNames: S.cities.map((c) => c.name).filter(Boolean),   // 精投本地按城市名筛用
       filters,
+      searchOverrides: S.searchOverrides,   // 手动改过的搜寻名，这些公司用它去定位
+      brandOverrides: S.brandOverrides,     // 贴网址锁定的主页 brandId，直接用、跳过定位
+      searchMinutes: S.searchMinutes,       // 搜索时长(分钟)，决定时间上限 + 行为预算(分钟×10)
     });
     // 这里保持 busy=true、按钮停在「停止」，直到 'done'/'error'/'aborted' 广播
   } catch (e) {
@@ -1147,37 +1165,139 @@ async function runSearch() {
   }
 }
 
+// ── 搜索实时计时 ──
+function fmtClock(ms) {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+}
+function startSearchTimer() {
+  S.searchStartAt = Date.now();
+  stopSearchTimer();
+  const tick = () => { const el = $('search-timer'); if (el) el.textContent = `用时 ${fmtClock(Date.now() - S.searchStartAt)}`; };
+  tick();
+  S.searchTimer = setInterval(tick, 1000);
+}
+function stopSearchTimer() { if (S.searchTimer) { clearInterval(S.searchTimer); S.searchTimer = null; } }
+function finalizeSearchTimer() {
+  stopSearchTimer();
+  const el = $('search-timer');
+  if (el && S.searchStartAt) el.textContent = `本次搜索用时 ${fmtClock(Date.now() - S.searchStartAt)}`;
+}
+
 function renderSearchProgress(task) {
   $('search-progress').hidden = false;
   $('search-phase').textContent = PHASE_TEXT[task.phase] || task.phase;
   const p = task.progress || {};
 
-  // 精投：按「已完成单元 + 当前单元页进度/单元总单元」给百分比，跟着翻页平滑推进
-  if (p.unitTotal && task.phase !== 'done') {
+  // 精投：进度% = 已执行行为数 / 总允许行为数（x/50）。剩余时间按剩余行为 × 6秒估。
+  if (p.actionsBudget && task.phase !== 'done') {
+    const pct = Math.min(99, Math.max(1, Math.round((p.actionsDone || 0) / p.actionsBudget * 100)));
+    const remainSec = Math.max(0, p.actionsBudget - (p.actionsDone || 0)) * 6;
+    $('search-fill').style.width = `${pct}%`;
+    $('search-detail').textContent =
+      `${pct}% · 约还需 ${fmtMin(remainSec)} · 已收 ${p.collected || 0} 个`;
+  } else if (p.unitTotal && task.phase !== 'done') {
     const subFrac = Math.min(1, (p.domPage || 0) / (p.domMaxPages || CONFIG.COMPANY_PAGES_MAX || 15));
     const doneFrac = ((p.unitDone || 0) + subFrac) / p.unitTotal;
     const pct = Math.min(99, Math.max(1, Math.round(doneFrac * 100)));
-    const unitsLeft = Math.max(0, p.unitTotal - (p.unitDone || 0) - subFrac);
-    // 每单元剩余耗时≈中位页数×冷却均值（同 estimateRangeSec 的模型）
-    const cdAvg = ((CONFIG.COOLDOWN_MIN_MS + CONFIG.COOLDOWN_MAX_MS) / 2) / 1000;
-    const midUnitSec = ((EST.estPagesMin + EST.estPagesMax) / 2 - 1) * cdAvg;
-    const remainSec = unitsLeft * midUnitSec;
     $('search-fill').style.width = `${pct}%`;
-    $('search-detail').textContent =
-      `${pct}% · 已完成 ${p.unitDone || 0}/${p.unitTotal} · 约还需 ${fmtMin(remainSec)} · 已收 ${p.collected || 0} 个`;
+    $('search-detail').textContent = `${pct}% · 已完成 ${p.unitDone || 0}/${p.unitTotal} · 已收 ${p.collected || 0} 个`;
   } else if (p.rounds) {
     $('search-fill').style.width = `${task.phase === 'done' ? 100 : ((p.round || 0) / p.rounds) * 100}%`;
     // 只留一行干净的进度，不提限流、不堆细节
     $('search-detail').textContent = task.phase === 'done'
       ? '' : `已找到 ${p.collected || 0} 个`;
   }
-  if (task.phase === 'error') $('search-phase').textContent = `出错了：${task.error}`;
+  renderCompanyStatus(task);
+  if (task.phase === 'error') { $('search-phase').textContent = `出错了：${task.error}`; finalizeSearchTimer(); }
   if (task.phase === 'done') {
     $('search-fill').style.width = '100%';
     // 不再显示灰色小字（数量+限流提示），漏斗里已经有完整数据
     $('search-detail').textContent = '';
+    finalizeSearchTimer();   // 停表，显示本次搜索总用时
+    S.searchDetailOpen = false;   // 结束后自动收起「搜索过程与结果」
     renderFunnel(task);
+    syncSearchDetail();
+    maybeWarnLogin(task);   // 结果异常偏少 → 提示检查登录
   }
+}
+
+/** 登录失效检测：精投时若「已定位的公司几乎都只收到 1 页」，极可能是 BOSS 登录失效，提示用户。 */
+function maybeWarnLogin(task) {
+  const warn = $('login-warn');
+  if (!warn) return;
+  let suspect = false;
+  if (S.searchMode === 'company') {
+    const stats = (task.progress || {}).companyStats || {};
+    const located = Object.values(stats).filter((x) => x && x.count > 0);
+    const avgP = located.length ? located.reduce((a, b) => a + (b.pages || 0), 0) / located.length : 0;
+    suspect = located.length > 0 && avgP <= 1.3;   // 大家都只翻了 1 页左右 = 典型的没登录
+  }
+  warn.hidden = !suspect;
+}
+
+// 「搜索过程与结果」折叠区的显隐同步
+function syncSearchDetail() {
+  const open = S.searchDetailOpen;
+  const body = $('sd-body'); if (body) body.hidden = !open;
+  const a = $('sd-head') && $('sd-head').querySelector('.fold-arrow'); if (a) a.textContent = open ? '▾' : '▸';
+}
+function updateSearchDetailSec() {
+  const sec = $('search-detail-sec'); if (!sec) return;
+  const hasCs = $('company-status') && $('company-status').children.length > 0;
+  const hasFn = $('funnel') && $('funnel').innerHTML.trim() !== '';
+  sec.hidden = !(hasCs || hasFn);
+  syncSearchDetail();
+}
+
+/** 及时回馈：精投时逐家公司显示到哪一步了（定位中/搜职位中/已完成/没定位到）。 */
+function renderCompanyStatus(task) {
+  const el = $('company-status');
+  if (!el) return;
+  if (S.searchMode !== 'company' || !S.companies.length) { el.innerHTML = ''; updateSearchDetailSec(); return; }
+  const st = (task.progress || {}).companyStatus || {};
+  const META = {
+    locating: { t: '定位中', c: 'run', i: '•' },
+    searching: { t: '搜职位中', c: 'run', i: '•' },
+    running: { t: '搜索中', c: 'run', i: '•' },
+    done: { t: '已完成', c: 'ok', i: '✓' },
+    miss: { t: '没定位到', c: 'bad', i: '✗' },
+  };
+  // 完成后：按「翻页数(工作步数)」算本轮平均，页数过少的标出来（主指标，不受冷却时间影响；
+  // 用时只做显示参考，不拿来判异常）。
+  const stats = (task.progress || {}).companyStats || {};
+  const live = (task.progress || {}).companyLive || {};
+  // 只有翻了 2 页以上（真正有在翻页）的公司才算进平均，免得被一堆 1 页的拉低基准
+  const pageArr = Object.values(stats).filter((x) => x && x.count > 0 && (x.pages || 0) >= 2).map((x) => x.pages || 0);
+  const avgPages = pageArr.length ? pageArr.reduce((a, b) => a + b, 0) / pageArr.length : 0;
+
+  el.innerHTML = S.companies.map((c) => {
+    const s = st[c.name];
+    const m = META[s] || { t: task.phase === 'done' ? '未搜到' : '排队中', c: 'pend', i: '◦' };
+    let ico = m.i, cls = m.c, step = m.t;
+    // 搜索中：实时显示翻了几页（工作步数）
+    if (s === 'searching' && live[c.name]) step = `搜职位中 · 第 ${live[c.name]} 页`;
+    const stat = stats[c.name];
+    if (s === 'done' && stat) {
+      const pages = stat.pages || 0, cnt = stat.count || 0;
+      step = `${cnt} 个 · ${pages} 页 · ${(stat.ms / 1000).toFixed(0)}s`;
+      // 异常标准：收到 0 个，或工作步数(翻页数) < 本轮平均的 50%
+      if (cnt === 0) { ico = '❗'; cls = 'bad'; step += ' · 没收到岗位，疑似异常/没登录'; }
+      else if (avgPages && pages < avgPages * 0.5) { ico = '⚠'; cls = 'warn'; step += ' · 页数不足平均一半，可能异常'; }
+    }
+    let html = `<div class="cs-row ${cls}"><span class="cs-ico">${ico}</span><span class="cs-name">${esc(c.name)}</span><span class="cs-step">${esc(step)}</span></div>`;
+    // 有问题的公司（异常/没定位到）：下一行显示用的「搜寻名」+ 更改按钮，可手动改成收得住的名字
+    const flagged = s === 'miss' || (s === 'done' && (cls === 'bad' || cls === 'warn'));
+    if (flagged) {
+      const term = S.searchOverrides[c.name] || c.search || c.name;
+      const pinned = S.brandOverrides[c.name] ? '（已锁定主页）' : '';
+      html += `<div class="cs-sub"><span class="cs-bid">搜寻名：${esc(term)}${pinned}</span>`
+        + `<button class="cs-edit" data-company="${esc(c.name)}">更改</button>`
+        + `<button class="cs-url" data-company="${esc(c.name)}">改网址</button></div>`;
+    }
+    return html;
+  }).join('');
+  updateSearchDetailSec();
 }
 
 /**
@@ -1256,6 +1376,7 @@ function renderFunnel(task) {
 
   $('funnel').innerHTML = rows.join(' · ');
   $('funnel').hidden = false;
+  updateSearchDetailSec();
 }
 
 async function loadResults() {
@@ -1263,12 +1384,14 @@ async function loadResults() {
   // 按单一 state 查会漏
   const r = await ask(MSG.QUERY_JOBS, { taskId: S.taskId, limit: CONFIG.REVIEW_POOL_SIZE });
   S.jobs = r.jobs || [];
+  // 新一轮结果：所有公司分组默认【收起】，用户点开想看的那家（收非存在的组名无害）
+  S.collapsedGroups = new Set([...S.companies.map((c) => c.name), ...S.positions, '其他']);
   // 精筛子词：从这次搜的岗位词拆出来，默认全部点亮
   S.refineTerms = genRefineTerms(S.positions);
   // 默认全选当前可见(精筛后)的岗位
   renderUploads();   // 结果页顶部也放简历，跟即投一致
   renderRefineBar();
-  S.selected = new Set(visibleJobs().map((j) => j.jobId));
+  selectVisibleCapped();   // 默认全选可见（75保护封顶）
   renderJobs();
   $('result-body').hidden = S.jobs.length === 0;
   $('search-empty').hidden = S.jobs.length > 0;
@@ -1358,7 +1481,15 @@ function buildJobCard(j) {
     </div>`;
 
   el.querySelector('input').addEventListener('change', (e) => {
-    if (e.target.checked) S.selected.add(j.jobId); else S.selected.delete(j.jobId);
+    if (e.target.checked) {
+      // 75保护开着且已到上限：不让再勾，提示一下
+      if (S.protect75 && !S.selected.has(j.jobId) && S.selected.size >= SEND_CAP()) {
+        e.target.checked = false;
+        toast(`75保护：单批最多选 ${SEND_CAP()} 个，关掉保护可超过`, 3500);
+        return;
+      }
+      S.selected.add(j.jobId);
+    } else S.selected.delete(j.jobId);
     el.classList.toggle('off', !e.target.checked);
     syncSelectAll();
     updateAction();
@@ -1378,6 +1509,18 @@ function buildJobCard(j) {
 
 /** 精筛后可见的岗位：岗位名含「任一点亮的子词」(或门)才留。
  *  没有子词可筛(没岗位词)→ 全给；有子词但一个都没点亮 → 0 个。 */
+// ── 75保护：自动选中封顶在单批上限 ──
+const SEND_CAP = () => CONFIG.SOFT_BATCH_LIMIT || 75;
+function selectVisibleCapped() {   // 全选可见：开了保护只选前 SEND_CAP 个
+  const vis = visibleJobs().map((j) => j.jobId);
+  S.selected = new Set(S.protect75 ? vis.slice(0, SEND_CAP()) : vis);
+}
+function enforceCap() {             // 加选后超额就裁回（按可见顺序保前面的）
+  if (!S.protect75 || S.selected.size <= SEND_CAP()) return;
+  const keep = visibleJobs().filter((j) => S.selected.has(j.jobId)).slice(0, SEND_CAP()).map((j) => j.jobId);
+  S.selected = new Set(keep);
+}
+
 function visibleJobs() {
   if (!S.refineTerms || !S.refineTerms.length) return S.jobs;   // 没得筛，全给
   const lit = S.refineTerms.filter((t) => t.on);
@@ -1397,7 +1540,8 @@ function visibleJobs() {
 function renderRefineBar() {
   const sec = $('refine-sec');
   if (!sec) return;
-  sec.hidden = !(S.refineTerms && S.refineTerms.length);
+  sec.hidden = !(S.jobs && S.jobs.length);   // 有结果就显示（至少放 75保护开关）
+  const pb = $('protect-75'); if (pb) pb.checked = S.protect75;
   const box = $('refine-chips');
   box.innerHTML = '';
   const jobs = S.jobs || [];
@@ -1415,8 +1559,8 @@ function renderRefineBar() {
   }
 }
 function afterRefineChange() {
-  // 精筛变化后，默认把可见岗位重新全选（取消不想要的更省力）
-  S.selected = new Set(visibleJobs().map((j) => j.jobId));
+  // 精筛变化后，默认把可见岗位重新全选（75保护封顶；取消不想要的更省力）
+  selectVisibleCapped();
   renderRefineBar();
   renderJobs();
 }
@@ -1439,25 +1583,35 @@ function renderJobs() {
   }
 
   if (groups) {
+    S.collapsedGroups = S.collapsedGroups || new Set();
     for (const [name, jobs] of groups) {
       if (!jobs.length) continue;
+      const collapsed = S.collapsedGroups.has(name);
       const head = document.createElement('div');
       head.className = 'group-head';
-      // 用正方形勾选框：勾上=全选这组，取消=全不选
+      // 左侧：折叠箭头 + 公司名 + 数量（点这块折叠/展开）；右侧：整组全选框
       const ids = jobs.map((j) => j.jobId);
       const allOn = ids.every((id) => S.selected.has(id));
       const someOn = ids.some((id) => S.selected.has(id));
-      head.innerHTML = `<span class="group-title">${esc(name)} <span class="group-count">${jobs.length}</span></span>`
+      head.innerHTML = `<span class="group-left">`
+        + `<span class="fold-arrow">${collapsed ? '▸' : '▾'}</span>`
+        + `<span class="group-title">${esc(name)} <span class="group-count">${jobs.length}</span></span>`
+        + `</span>`
         + `<label class="group-check"><input type="checkbox" ${allOn ? 'checked' : ''}></label>`;
+      // 点左半区（箭头/公司名）折叠，点右边的勾选框全选——两者互不干扰
+      head.querySelector('.group-left').addEventListener('click', () => {
+        if (S.collapsedGroups.has(name)) S.collapsedGroups.delete(name); else S.collapsedGroups.add(name);
+        renderJobs();
+      });
       const box = head.querySelector('.group-check input');
       box.indeterminate = someOn && !allOn;   // 半选状态
       box.addEventListener('change', (e) => {
-        if (e.target.checked) { for (const id of ids) S.selected.add(id); }
+        if (e.target.checked) { for (const id of ids) S.selected.add(id); enforceCap(); }
         else { for (const id of ids) S.selected.delete(id); }
         renderJobs();
       });
       list.appendChild(head);
-      for (const j of jobs) list.appendChild(buildJobCard(j));
+      if (!collapsed) for (const j of jobs) list.appendChild(buildJobCard(j));   // 折叠时不渲染卡
     }
   } else {
     for (const j of S.jobs) list.appendChild(buildJobCard(j));
@@ -1487,11 +1641,67 @@ function syncSelectAll() {
 }
 
 $('sel-all').addEventListener('change', (e) => {
-  // 只对精筛后可见的岗位做全选/全不选
-  const vis = visibleJobs().map((j) => j.jobId);
-  if (e.target.checked) for (const id of vis) S.selected.add(id);
-  else for (const id of vis) S.selected.delete(id);
+  // 只对精筛后可见的岗位做全选/全不选（全选走 75保护封顶）
+  if (e.target.checked) selectVisibleCapped();
+  else for (const id of visibleJobs().map((j) => j.jobId)) S.selected.delete(id);
   renderJobs();
+});
+
+// 「搜索过程与结果」折叠/展开
+$('sd-head').addEventListener('click', () => { S.searchDetailOpen = !S.searchDetailOpen; syncSearchDetail(); });
+
+// 手动改某家公司的「搜寻名」（异常公司那行的「更改」按钮，需密码）
+function saveSearchOverrides() { try { chrome.storage.local.set({ 'jt:searchOverrides': S.searchOverrides }); } catch (e) {} }
+$('company-status').addEventListener('click', (e) => {
+  const btn = e.target.closest('.cs-edit');
+  if (!btn) return;
+  const company = btn.dataset.company;
+  const pw = window.prompt('更改搜寻名需要密码：');
+  if (pw == null) return;
+  if (pw.trim() !== '012026') { toast('密码错误，未更改', 3000); return; }
+  const co = S.companies.find((x) => x.name === company) || {};
+  const cur = S.searchOverrides[company] || co.search || company;
+  const v = window.prompt(`改「${company}」的搜寻名（我用来在 BOSS 定位这家的中文名，比如 智谱AI 该搜 智谱华章）`, cur);
+  if (v == null) return;
+  const term = v.trim();
+  if (term && term !== (co.search || company)) S.searchOverrides[company] = term; else delete S.searchOverrides[company];
+  saveSearchOverrides();
+  const sub = btn.closest('.cs-sub'); const span = sub && sub.querySelector('.cs-bid');
+  if (span) span.textContent = `搜寻名：${S.searchOverrides[company] || co.search || company}${S.brandOverrides[company] ? '（已锁定主页）' : ''}`;
+  toast(S.searchOverrides[company] ? `已把「${company}」的搜寻名改成「${S.searchOverrides[company]}」，下次搜这家用它` : `已恢复「${company}」的默认搜寻名`, 3500);
+});
+
+// 改网址：贴公司主页网址 → 抽出 brandId → 下次搜这家直接进这个主页（跳过定位，最稳）
+function saveBrandOverrides() { try { chrome.storage.local.set({ 'jt:brandOverrides': S.brandOverrides }); } catch (e) {} }
+$('company-status').addEventListener('click', (e) => {
+  const btn = e.target.closest('.cs-url');
+  if (!btn) return;
+  const company = btn.dataset.company;
+  const pw = window.prompt('改网址需要密码：');
+  if (pw == null) return;
+  if (pw.trim() !== '012026') { toast('密码错误，未更改', 3000); return; }
+  const v = window.prompt(`贴上「${company}」在 BOSS 的公司主页网址\n（在 BOSS 搜到这家、点进它主页，复制地址栏，形如 .../gongsi/xxxx.html；留空=取消锁定）`, '');
+  if (v == null) return;
+  const url = v.trim();
+  if (!url) { delete S.brandOverrides[company]; saveBrandOverrides(); toast(`已取消「${company}」的主页锁定，恢复自动定位`, 3500); }
+  else {
+    const m = url.match(/gongsi\/(?:job\/)?([^.?\/]+)\.html/);
+    if (!m) { toast('网址里没找到 /gongsi/xxx.html，没改', 4000); return; }
+    S.brandOverrides[company] = m[1];
+    saveBrandOverrides();
+    toast(`已锁定「${company}」的主页，下次搜这家直接进它、跳过定位`, 3800);
+  }
+  const sub = btn.closest('.cs-sub'); const span = sub && sub.querySelector('.cs-bid');
+  const co = S.companies.find((x) => x.name === company) || {};
+  if (span) span.textContent = `搜寻名：${S.searchOverrides[company] || co.search || company}${S.brandOverrides[company] ? '（已锁定主页）' : ''}`;
+});
+
+// 75保护开关：开 → 把当前选择裁回 75；关 → 放开，可超过
+$('protect-75').addEventListener('change', (e) => {
+  S.protect75 = e.target.checked;
+  if (S.protect75) enforceCap();
+  renderJobs();
+  toast(S.protect75 ? `75保护已开：单批最多 ${SEND_CAP()} 个` : '75保护已关：可选超过 75', 3000);
 });
 
 // 招呼语模式：AI 定制 / 自定义
@@ -1852,8 +2062,21 @@ $('btn-service').addEventListener('click', openService);
 $('service-close').addEventListener('click', closeService);
 $('service-mask').addEventListener('click', closeService);
 
-// 设置：暂时无动作，后续再设计
-$('btn-settings').addEventListener('click', () => { /* TODO: 设置面板 */ });
+// 设置抽屉：搜索时长拉杆
+function openSettings() {
+  $('dur-range').value = S.searchMinutes;
+  $('dur-val').textContent = S.searchMinutes;
+  $('settings-mask').hidden = false; $('settings-drawer').hidden = false;
+}
+function closeSettings() { $('settings-mask').hidden = true; $('settings-drawer').hidden = true; }
+$('btn-settings').addEventListener('click', openSettings);
+$('settings-close').addEventListener('click', closeSettings);
+$('settings-mask').addEventListener('click', closeSettings);
+$('dur-range').addEventListener('input', (e) => {
+  S.searchMinutes = Math.min(30, Math.max(3, parseInt(e.target.value, 10) || 5));
+  $('dur-val').textContent = S.searchMinutes;
+  try { chrome.storage.local.set({ 'jt:searchMinutes': S.searchMinutes }); } catch (err) {}
+});
 
 chrome.runtime.onMessage.addListener((msg) => {
   // 单岗位招呼语生成完成：就地填进对应卡片（不跳屏）
@@ -1924,7 +2147,7 @@ chrome.runtime.onMessage.addListener((msg) => {
   // HR 活跃度和工作性质之前是预设好的，现在交还给用户自己点：
   // 预设值会让人以为「我什么都没选」，实际上池子已经被悄悄收窄了。
 
-  const st = await chrome.storage.local.get(STORE.UI.FILTER_STATE);
+  const st = await chrome.storage.local.get([STORE.UI.FILTER_STATE, 'jt:searchOverrides', 'jt:brandOverrides', 'jt:searchMinutes']);
   const saved = st[STORE.UI.FILTER_STATE];
   if (saved) {
     S.searchMode = saved.searchMode || 'position';
@@ -1933,6 +2156,9 @@ chrome.runtime.onMessage.addListener((msg) => {
     S.positions = saved.positions || [];
     S.filters = saved.filters || S.filters;
   }
+  S.searchOverrides = st['jt:searchOverrides'] || {};
+  S.brandOverrides = st['jt:brandOverrides'] || {};
+  S.searchMinutes = Math.min(30, Math.max(3, st['jt:searchMinutes'] || 5));
 
   renderUploads();
   renderMode();
