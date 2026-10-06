@@ -89,6 +89,21 @@ body {
   padding: 12px; border-radius: 12px; background: var(--accent);
   color: #fff; font-size: 14px; font-weight: 600; text-decoration: none;
 }
+.svc-admin {
+  display: block; text-align: center; margin-top: 10px;
+  font-size: 12px; color: var(--muted); text-decoration: none;
+}
+.svc-admin:hover { text-decoration: underline; }
+
+/* 客服反馈表单（需求#5：自由文本必填 + 联系方式选填）*/
+.svc-fb { margin: 14px 0 6px; display: flex; flex-direction: column; gap: 8px; }
+.svc-fb-title { font-size: 13px; font-weight: 600; color: var(--text); }
+.svc-fb textarea, .svc-fb input {
+  width: 100%; padding: 9px 12px; font-size: 13px; font-family: inherit;
+  border: 1px solid var(--line-soft); border-radius: 8px;
+  background: var(--card); color: var(--text); outline: none; resize: vertical;
+}
+.svc-fb textarea:focus, .svc-fb input:focus { border-color: var(--accent); }
 
 /* ── 屏幕与分区 ── */
 .screen { display: none; }
@@ -227,6 +242,14 @@ textarea:focus { outline: none; border-color: var(--accent-line); }
 .fold-sec .fold-head { padding: 11px 14px; font-size: 13px; font-weight: 600; color: var(--text); cursor: pointer; user-select: none; display: flex; align-items: center; gap: 7px; background: var(--card); }
 .fold-sec .fold-head .fold-arrow { color: var(--muted); font-size: 11px; }
 .fold-sec .fold-body { padding: 4px 14px 14px; }
+
+/* 使用统计（埋点本地后台）*/
+.stats-content { display: flex; flex-direction: column; gap: 6px; padding: 6px 0 10px; }
+.stats-content .st-row { display: flex; align-items: baseline; gap: 8px; font-size: 12.5px; color: var(--text); }
+.stats-content .st-label { flex: 0 0 auto; color: var(--muted); }
+.stats-content .st-val { font-weight: 600; }
+.stats-content .st-sub { font-size: 11px; color: var(--muted); }
+.stats-note { font-size: 11px; color: var(--muted); line-height: 1.6; margin-bottom: 10px; }
 .company-status { display: flex; flex-direction: column; gap: 7px; }
 .company-status .cs-row { display: flex; align-items: center; gap: 8px; font-size: 12.5px; }
 .company-status .cs-ico { width: 16px; text-align: center; flex: 0 0 auto; font-weight: 700; }
@@ -395,6 +418,9 @@ button.btn.primary:disabled { background: #a9cbbb; color: #fff; cursor: not-allo
 .jcard .body { flex: 1; min-width: 0; }
 .jcard .jname { font-size: 13.5px; font-weight: 600; color: var(--text); line-height: 1.35; }
 .jcard .jcompany { font-size: 11.5px; color: var(--muted); margin-top: 4px; }
+/* 精投模式：公司名可点击 → 官网招聘页/搜索兜底（共笔条目 1/2） */
+.jcard .jcompany-link { color: var(--accent, #4f7cff); text-decoration: none; cursor: pointer; }
+.jcard .jcompany-link:hover { text-decoration: underline; }
 .jcard .jcompany:empty, .jcard .jsalary:empty { display: none; }
 .jcard .jsalary { font-size: 12.5px; font-weight: 700; color: var(--accent); margin-top: 4px; }
 .jcard .tags { margin-top: 7px; display: flex; flex-wrap: wrap; gap: 6px; }

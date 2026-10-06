@@ -33,7 +33,14 @@
       <details><summary>招呼语生成慢</summary><p>会并发生成，通常一分钟内完成。若卡住，多半是网络或模型接口波动，稍等或重试。</p></details>
       <details><summary>投递显示失败</summary><p>失败会标明原因（如没找到输入框）。可在投递完成页对失败的岗位一键重投。</p></details>
     </div>
+    <div class="svc-fb">
+      <div class="svc-fb-title">提需求 / 反馈问题</div>
+      <textarea id="fb-text" rows="3" placeholder="想提什么需求、或遇到了什么问题？（必填）"></textarea>
+      <input type="text" id="fb-contact" placeholder="联系方式（选填，方便我们回复你）">
+      <button id="fb-submit" class="btn primary">提交反馈</button>
+    </div>
     <a class="svc-contact" href="mailto:benyi2abiding@gmail.com">联系人工客服</a>
+    <a class="svc-admin" href="../admin/admin.html" target="_blank">数据后台（内部入口）</a>
   </div>
 </div>
 
@@ -104,6 +111,16 @@
       <div class="tip"><i>1</i><span>在浏览器打开 BOSS 直聘页面</span></div>
       <div class="tip"><i>2</i><span>确保<b>已登录</b>你的 BOSS 账号</span></div>
       <div class="tip"><i>3</i><span>为避免招呼语生成过久，请确保<b>关闭</b> VPN</span></div>
+    </div>
+  </section>
+
+  <!-- 使用统计（埋点本地后台：日活 / 海投·精投点击渗透 / 投递点击渗透）-->
+  <section class="fold-sec" id="stats-sec">
+    <div class="fold-head" id="stats-head"><span class="fold-arrow">▸</span> 使用统计</div>
+    <div class="fold-body" id="stats-body" hidden>
+      <div id="stats-content" class="stats-content"></div>
+      <div class="stats-note">当前为本机统计（匿名 ID 去重，不含任何个人资料）；接入云端后台后可看多用户汇总。</div>
+      <button id="btn-stats-export" class="btn ghost" style="width:100%">导出近 90 天 CSV</button>
     </div>
   </section>
 
@@ -204,6 +221,7 @@
 
 <script src="../shared/constants.js"></script>
 <script src="../shared/utils.js"></script>
+<script src="../shared/tracker.js"></script>
 <script src="../data/companies.js"></script>
 <script src="../data/positions.js"></script>
 <script src="../data/position-tree.js"></script>

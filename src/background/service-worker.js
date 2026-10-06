@@ -125,6 +125,43 @@ async function askTab(tabId, type, payload) {
   return res;
 }
 
+// ── 全局行为闸（精投翻页 / 海投滚动共用）──
+// 无论几个标签在跑，全局每 N 秒随机只放行一个「行为」。用「预约下一个时间槽」
+// 保证并发的 worker 依次拿到往后排的槽（先到先得≈轮流派发），不会一起放行。
+// 任意时刻只有一个请求在飞、均匀无突刺，这是躲限流(code:37)的关键。
+// 间隔区间各模式自带（当前精投/海投同为 4~6 秒，用户 2026-10-06 定）；
+// 槽链 nextTurnAt 全局一条，两模式不会同时跑。
+let nextTurnAt = 0;
+async function acquireTurnGlobal(minMs, maxMs) {
+  const lo = minMs || CONFIG.TURN_GATE_MIN_MS || 4000;
+  const hi = maxMs || CONFIG.TURN_GATE_MAX_MS || 6000;
+  const now = Date.now();
+  const at = Math.max(now, nextTurnAt);
+  nextTurnAt = at + U.randInt(lo, hi);
+  if (at > now) await U.sleep(at - now);
+}
+
+// ── 全局开页闸（精投 / 海投共用）──
+// 模仿人类：人不会同一秒连开好几个分页。每开一个分页全局隔 1~2 秒随机，
+// 同样用「预约下一个时间槽」保证并发调用拿到依次往后排的槽，轮流开、不突刺。
+let nextOpenAt = 0;
+async function acquireOpenSlot() {
+  const now = Date.now();
+  const at = Math.max(now, nextOpenAt);
+  nextOpenAt = at + U.randInt(CONFIG.TAB_OPEN_MIN_MS || 1000, CONFIG.TAB_OPEN_MAX_MS || 2000);
+  if (at > now) await U.sleep(at - now);
+}
+
+// ── 关分页（精投 / 海投共用手法）──
+// 模仿人类：用完不秒关，隔 1~3 秒随机再关；异步不 await，下一步不用等它关完。
+function closeTabLater(tabId) {
+  if (!tabId) return;
+  setTimeout(
+    () => chrome.tabs.remove(tabId).catch(() => {}),
+    U.randInt(CONFIG.TAB_CLOSE_MIN_MS || 1000, CONFIG.TAB_CLOSE_MAX_MS || 3000),
+  );
+}
+
 /**
  * 在一个专属标签页里搜一个城市，采完就关。
  *
@@ -135,77 +172,97 @@ async function askTab(tabId, type, payload) {
  * 每个新标签页里嗅探器和采集器会随页面加载自动就位（manifest 已注册），
  * 不用手动补注入。
  */
-async function collectOnCity(keywords, cityCode, filters, onProgress, gateTokens = null) {
-  // keywords：这个城市要挨个搜的关键词数组。
-  // 关键改动：不再把多个岗位词用逗号拼成一个模糊 query（那会让 BOSS 做宽松
-  // 全文匹配，捞回大量销售/无关岗，75 个砍剩 14）。改成每个岗位词单独搜一轮，
-  // 每轮都是精确匹配，命中率高、垃圾少；多个词的结果并集起来，总量也更大。
-  const kws = keywords.length ? keywords : [''];
-  // 每个岗位词召回封顶：单批只投 SOFT_BATCH_LIMIT 个，一个岗位词收到它的
-  // RECALL_CAP_MULTIPLIER 倍(默认 2×≈150)就够精筛挑了。按 ~15 条/页折算成翻页数，
-  // 别一路翻到 BOSS 天花板(~450)白耗时间。
-  const recallCap = (CONFIG.SOFT_BATCH_LIMIT || 75) * (CONFIG.RECALL_CAP_MULTIPLIER || 2);
-  const kwPages = Math.max(1, Math.min(CONFIG.MAX_PAGES, Math.ceil(recallCap / 15)));
-  const first = buildSearchUrl({ ...filters, query: kws[0], city: cityCode });
-  console.log('[闪投] 开搜:', first);
-  // ★ active:true —— 前台标签页 BOSS 会话/签名才完整，后台会 code_19。
-  const tab = await chrome.tabs.create({ url: first, active: true });
-  const tabId = tab.id;
-  const merged = new Map();
-  let lastStop = 'exhausted';
-  let source = null;
-  try {
-    await waitForTabComplete(tabId);
-    let ready = false;
-    for (let i = 0; i < 20; i++) {
-      await U.sleep(500);
-      const p = await pingTab(tabId);
-      if (p.ok) { ready = true; break; }
+async function runHaitouScroll(config, merged, onProgress) {
+  // 每个城市一个标签（最多 HAITOU_MAX_TABS=5 并行），城内各职位词串行复用同一标签。
+  // 行为预算 = 搜索时长(分钟)×12（ACTIONS_PER_MINUTE，5 分钟 = 60 个），按「词×城」单元平分（用户定的口径）；
+  // 每一次滚动 = 一个行为，过全局闸 acquireTurnGlobal；连续 3 次滚动 0 新增 / 预算完 / 时间到即停。
+  const posWords = (config.positions || []).filter(Boolean);
+  const keywords = posWords.length ? posWords : [''];   // 没选词 → 空词按筛选条件浏览
+  const cities = ((config.cities && config.cities.length) ? config.cities : ['']).slice(0, CONFIG.HAITOU_MAX_TABS || 5);
+  const mins = Math.min(30, Math.max(3, config.searchMinutes || CONFIG.DEFAULT_SEARCH_MINUTES || 5));
+  const taskDeadline = (state.task.startedAt || Date.now()) + mins * 60000;
+  const budget = Math.max(1, Math.round(mins * (CONFIG.ACTIONS_PER_MINUTE || 12)));
+  const perUnit = Math.max(3, Math.floor(budget / (cities.length * keywords.length)));
+  let actionsDone = 0;
+  const perCity = {};
+  const stop = () => state.stopRequested || state.task.phase === 'aborted' || Date.now() >= taskDeadline;
+  const report = (cityCode, kw) => onProgress && onProgress({
+    city: cityCode, keyword: kw, collected: merged.size, actionsDone, actionsBudget: budget,
+  });
+
+  await runInBatches(cities, CONFIG.HAITOU_MAX_TABS || 5, async (cityCode) => {
+    if (stop()) return;
+    // ① 无论在哪，先回 BOSS 主页（真人链路第 1 步）。
+    //    开分页先过开页闸：几个城标签每隔 1~2 秒随机轮流开，不一窝蜂齐开（模仿人类）。
+    await acquireOpenSlot();
+    if (stop()) return;
+    const tab = await chrome.tabs.create({ url: BOSS.ORIGIN + '/', active: true });
+    const tabId = tab.id;
+    try {
+      await waitForTabComplete(tabId);
+      let readyOk = false;
+      for (let i = 0; i < 20; i++) { await U.sleep(500); if ((await pingTab(tabId)).ok) { readyOk = true; break; } }
+      if (!readyOk) return;
+      await U.sleep(U.randInt(800, 1800));   // 页面加载完人也要看一眼再动手
+
+      for (let ki = 0; ki < keywords.length; ki++) {
+        if (stop()) break;
+        const kw = keywords[ki];
+        // ② 驱动首页搜索框搜词（第 2 词起先导航回主页，对齐「无论在哪都回主页」）。
+        //    布置阶段的每个动作都过 1~2 秒开页闸排队：多分页轮流布置，1-2 秒一个行为。
+        if (ki > 0) {
+          await acquireOpenSlot();   // 回主页导航 = 一个布置行为，排队
+          if (stop()) break;
+          await chrome.tabs.update(tabId, { url: BOSS.ORIGIN + '/', active: true });
+          await waitForTabComplete(tabId);
+          await U.sleep(U.randInt(900, 1600));   // 回主页后停一停，像人在想下一个词
+        }
+        await acquireOpenSlot();   // 驱动搜索框（填词+点搜索）= 一个布置行为，排队
+        if (stop()) break;
+        await chrome.tabs.update(tabId, { active: true });
+        const drive = kw
+          ? await askTab(tabId, MSG.DRIVE_HOME_SEARCH, { keyword: kw }).catch(() => ({ ok: false }))
+          : { ok: false };
+        if (drive.ok) { await waitForTabComplete(tabId).catch(() => {}); await U.sleep(U.randInt(1000, 2000)); }
+        // ③ 选城市/筛选（= 人点筛选器，用结果页 URL 等效实现；搜索框驱动失败时这步也是兜底入口）。
+        //    布置「地方」也过 1~2 秒开页闸排队。
+        await acquireOpenSlot();
+        if (stop()) break;
+        await chrome.tabs.update(tabId, { url: buildSearchUrl({ ...(config.filters || {}), query: kw, city: cityCode }), active: true });
+        await waitForTabComplete(tabId).catch(() => {});
+        await U.sleep(U.randInt(1200, 2200));   // 等首屏渲染 + 嗅探器捕模板（随机，不写死）
+        await askTab(tabId, MSG.SCROLL_RESET).catch(() => {});
+
+        // ④ 滚动读卡：一次滚动 = 一个行为。滚动懒加载只在前台标签触发（后台被
+        //    Chrome 节流），所以每步先把标签激活——人一次也只能看一个标签。
+        let noNew = 0;
+        for (let s = 0; s < perUnit && !stop(); s++) {
+          // 海投行为闸：每 4~6 秒随机放行一个滚动行为（与精投同区间，用户定的口径）
+          await acquireTurnGlobal(CONFIG.HAITOU_TURN_GATE_MIN_MS || 4000, CONFIG.HAITOU_TURN_GATE_MAX_MS || 6000);
+          if (stop()) break;
+          await chrome.tabs.update(tabId, { active: true }).catch(() => {});
+          await U.sleep(U.randInt(250, 600));   // 切到前台后略停再滚，像人目光落回页面
+          const r = await askTab(tabId, MSG.COLLECT_ONE_SCROLL).catch(() => ({ jobs: [], newCount: 0 }));
+          actionsDone++;
+          for (const j of r.jobs || []) {
+            if (j.jobId && !merged.has(j.jobId)) {
+              j._cityCode = cityCode;
+              merged.set(j.jobId, j);
+              perCity[cityCode] = (perCity[cityCode] || 0) + 1;
+            }
+          }
+          noNew = (r.newCount || 0) === 0 ? noNew + 1 : 0;
+          report(cityCode, kw || '按筛选条件');
+          if (noNew >= 3) break;   // 连续 3 次 0 新增 = 滚到底了（2026-10-06 由 2 改为 3，用户定的口径）
+        }
+      }
+    } catch (e) {
+      console.log('[闪投] 海投滚动采集异常:', String(e.message || e));
+    } finally {
+      closeTabLater(tabId);   // 模仿人类：用完隔 1~3 秒随机再关，不秒删
     }
-    console.log('[闪投]', cityCode, 'cs就绪:', ready);
-    if (!ready) return { jobs: [], stoppedBy: 'cs_not_ready', source: null };
-
-    for (let ki = 0; ki < kws.length; ki++) {
-      if (state.stopRequested || state.task.phase === 'aborted') { lastStop = 'aborted'; break; }
-      if (ki > 0) {
-        // 换关键词：在同一个标签页里导航到下一个词的搜索页
-        await chrome.tabs.update(tabId, { url: buildSearchUrl({ ...filters, query: kws[ki], city: cityCode }) });
-        await waitForTabComplete(tabId);
-      }
-      await U.sleep(1500);   // 给页面时间发首屏请求、让嗅探器捕到模板
-
-      // 相关度闸门：按【岗位名是否属于目标职能家族】判断（gateTokens 如 ['产品']）。
-      // BOSS 的推荐填充会无视职位类型筛选照样塞非产品岗，闸门就靠家族根词把它们挡住：
-      // 「AI产品专家」「AI策略产品」含「产品」→ 留；「大客户代表」「机械工程师」→ 停翻。
-      // 用家族根词而非完整岗位词，避免因「公司名/岗位名不是搜索词原文」误停。
-      // 堆量模式：关掉「跑偏就提前停翻」的闸门，一路翻到 BOSS 没有下一页/到量上限为止。
-      // 相关度交给结果页的精筛去筛（源头已有职位类型 code 过滤，大体不跑太偏）。
-      const relevance = null;
-
-      let res;
-      try {
-        res = await askTab(tabId, MSG.COLLECT_PAGES, { maxPages: kwPages, relevance });
-      } catch (e) {
-        res = { jobs: [], stoppedBy: 'error:' + String(e.message || e).slice(0, 30) };
-      }
-      console.log('[闪投]', cityCode || '未选城市', '「' + kws[ki] + '」采到', (res.jobs || []).length, '停因', res.stoppedBy);
-      if (res.source) source = res.source;
-      for (const j of res.jobs || []) if (!merged.has(j.jobId)) { j._cityCode = cityCode; merged.set(j.jobId, j); }
-      if (res.stoppedBy) lastStop = res.stoppedBy;
-      if (onProgress) onProgress({ city: cityCode, keyword: kws[ki], count: merged.size });
-      // 被限流不再整城收手：这一词到此为止，歇久一点再搜下一个词。
-      // 不同关键词是不同 query，不一定都被限，尽量把量攒够。
-      if (ki < kws.length - 1) {
-        await U.sleep(res.stoppedBy === 'soft_block_37' ? 12000 : CONFIG.ROUND_INTERVAL_MS);
-      }
-    }
-    return { jobs: [...merged.values()], stoppedBy: lastStop, source };
-  } catch (e) {
-    console.log('[闪投] 采集异常:', String(e.message || e));
-    return { jobs: [...merged.values()], stoppedBy: 'error:' + String(e.message || e).slice(0, 40), source };
-  } finally {
-    setTimeout(() => chrome.tabs.remove(tabId).catch(() => {}), U.randInt(1000, 3000));   // 用完即删，但隔 1~3 秒再删
-  }
+  });
+  return { actionsDone, perCity };
 }
 
 /**
@@ -272,16 +329,9 @@ async function augmentFromCompanyPages(merged, config, onProgress) {
   // 要开多少个分页：公司数，封顶 8。这个 P 同时是冷却公式里的 N（固定，不随收完变）。
   const P = Math.max(1, Math.min(CONFIG.PARALLEL_COMPANIES || 2, companies.length));
 
-  // 开页闸：每开一个分页全局至少隔 1~2 秒随机，轮流开、不突刺。
-  // 用「预约下一个时间槽」而不是读旧时间戳——否则并行的 worker 会都读到同一个旧值、
-  // 都只等一下然后一起开（= 没错开）。预约法保证并发调用拿到依次往后 1~2 秒的槽。
-  let nextOpenAt = 0;
-  const openGate = async () => {
-    const now = Date.now();
-    const at = Math.max(now, nextOpenAt);
-    nextOpenAt = at + U.randInt(1000, 2000);   // 占住这个槽，下一个往后排
-    if (at > now) await U.sleep(at - now);
-  };
+  // 开页闸：每开一个分页全局至少隔 1~2 秒随机，轮流开、不突刺。闸已提升为模块级
+  // （acquireOpenSlot，海投开城标签也过同一条闸），这里只留个别名保持可读性。
+  const openGate = acquireOpenSlot;
 
   // 进度：一个「公司×词」是一个单元，总数 = 公司数 × 词数（和面板预估一致）
   const unitTotal = companies.length * queries.length;
@@ -290,7 +340,7 @@ async function augmentFromCompanyPages(merged, config, onProgress) {
 
   // 每个分页「一条龙」：先搜公司名读自己的 brandId → 直接进公司页搜职位（都在 processCompany 里）。
   // 这里只预取「已搜到的岗位」里能投票出的 brandId（精投通常没有，为 null），其余各标签现搜。
-  // 搜索时长：设置里拉杆的分钟数（3~30），决定时间上限 + 行为预算（每分钟≈10个行为）
+  // 搜索时长：设置里拉杆的分钟数（3~30），决定时间上限 + 行为预算（每分钟≈12个行为）
   const mins = Math.min(30, Math.max(3, config.searchMinutes || 5));
   const taskTimeoutMs = mins * 60000;
   const taskDeadline = (state.task.startedAt || Date.now()) + taskTimeoutMs;
@@ -334,11 +384,11 @@ async function augmentFromCompanyPages(merged, config, onProgress) {
   // 翻到底 / 到页数上限 / 这页没新增 / 这家已收够封顶量 —— 任一满足就停翻这个词
   const kwExhausted = (slot) => !slot.lastHasNext || slot.page >= slot.maxPages || slot.lastNew === 0
     || (slot.companySeen && slot.companySeen.size >= perCompanyCap);
-  // 关标签：不秒删，隔 1~3 秒随机再删；而且是后台异步的（不 await），下一家不用等删完就能开始
+  // 关标签：不秒删，隔 1~3 秒随机再删；而且是后台异步的（不 await），下一家不用等删完就能开始。
+  // 手法与海投共用 closeTabLater。
   const closeSlot = (slot) => {
     if (!slot || !slot.tabId) return;
-    const id = slot.tabId;
-    setTimeout(() => chrome.tabs.remove(id).catch(() => {}), U.randInt(1000, 3000));
+    closeTabLater(slot.tabId);
   };
   // 每家公司的实时状态：locating 定位中 / searching 搜职位中 / done 已完成 / miss 没定位到。
   const statuses = {};
@@ -348,20 +398,13 @@ async function augmentFromCompanyPages(merged, config, onProgress) {
   augmentFromCompanyPages._stats = stats;
   const report = (slot, kw) => { if (onProgress) onProgress({ company: slot.company, keyword: kw, unitDone, unitTotal, collected: merged.size, domPage: slot.page, domMaxPages: slot.maxPages, misses: brandMiss.slice(), statuses: { ...statuses }, live: { ...live }, actionsDone, actionsBudget }); };
 
-  // 全局行为闸（轮流派发）：无论几家在采，全局每 4~8 秒随机才放行一个「翻页行为」。
-  // 5 分钟≈300秒÷6秒均值≈50 个行为，总量有硬顶、均匀无突刺。用「预约下一个时间槽」保证
-  // 并发的页面依次拿到往后排的槽（先到先得≈轮流），而不是一起放行。
+  // 全局行为闸（轮流派发）：无论几家在采，全局每 4~6 秒随机才放行一个「翻页行为」。
+  // 5 分钟≈300秒÷5秒均值≈60 个行为，总量有硬顶、均匀无突刺。闸本身是模块级共享的
+  // （acquireTurnGlobal，海投 v2 的滚动行为也过同一条闸），这里只负责本模式的计数。
   let activeCount = 0;   // 仅用于显示/参考
-  let nextTurnAt = 0;
   let actionsDone = 0;   // 已执行的行为数（翻页数），进度% = actionsDone / actionsBudget
-  let actionsBudget = Math.max(1, Math.round(taskTimeoutMs / 6000));   // 浅搜≈50 / 深搜≈100（重做会 +10）
-  const turnGate = async () => {
-    const now = Date.now();
-    const at = Math.max(now, nextTurnAt);
-    nextTurnAt = at + U.randInt(4000, 8000);   // 占住这个槽，下一个往后排 4~8 秒
-    if (at > now) await U.sleep(at - now);
-    actionsDone++;
-  };
+  let actionsBudget = Math.max(1, Math.round(taskTimeoutMs / (60000 / (CONFIG.ACTIONS_PER_MINUTE || 12))));   // 浅搜≈60 / 深搜≈120（重做会 +10）
+  const turnGate = async () => { await acquireTurnGlobal(); actionsDone++; };
   const stop = () => state.stopRequested || state.task.phase === 'aborted' || timeUp();
 
   const ready = async (tabId) => {   // 等页面加载 + content script 就绪
@@ -427,7 +470,7 @@ async function augmentFromCompanyPages(merged, config, onProgress) {
         slot.lastNew = absorb(slot, res); slot.page = 1; slot.lastHasNext = !!res.hasNext;
         live[t.company] = pagesTotal + slot.page; report(slot, q);
         while (!kwExhausted(slot) && !stop()) {
-          await turnGate();   // 翻一页 = 一个行为，全局每 4~8 秒才放行一个
+          await turnGate();   // 翻一页 = 一个行为，全局每 4~6 秒才放行一个
           if (stop()) break;
           res = await askTab(slot.tabId, MSG.COMPANY_DOM_PAGE, { turnFirst: true }).catch(() => ({ jobs: [], hasNext: false, turned: false }));
           slot.page++;
@@ -702,24 +745,10 @@ async function runRecall(config = {}) {
     //   position（广撒网）：用岗位词搜，公司是搜完的可选软筛。
     //   company（锁定公司）：用公司名搜（公司名是很强的搜索信号，BOSS 会优先
     //     返回这家的岗位），搜完必按公司名筛，再按岗位词收窄（若填了）。
+    // 搜索方式：position（广撒网）/ company（锁定公司）。海投 v2 不再区分
+    // 「是否归类到职位类型 code」——筛选条件（含职位类型）照常拼进结果页 URL，
+    // 职位词逐个由首页搜索框驱动搜索（每词每城各一轮，量 = 词×城×滚动采集）。
     const mode = config.searchMode === 'company' ? 'company' : 'position';
-
-    // 是否已把岗位词归类到 BOSS 职位类型 code（服务端能精筛）
-    const hasPosCodes = !!(config.filters && config.filters.position
-      && (Array.isArray(config.filters.position) ? config.filters.position.length : config.filters.position));
-
-    // ── 决定「搜什么关键词」──
-    //   精投：公司名（要靠它定位到公司）。
-    //   海投 + 已归类职位类型：不要再用「AIGC产品经理/Agent产品经理」这种怪词模糊搜——
-    //     BOSS 会把 Agent→销售、AIGC→视频内容 乱匹配还硬塞推荐垃圾。改成【空关键词 +
-    //     职位类型类目筛选】，让 BOSS 按类目浏览，返回整个产品家族，又干净又全。
-    //   海投 + 没归类上（怪词 BOSS 无此类目）：退回按岗位词模糊搜 + 本地兜底。
-    const searchKeywords = mode === 'company'
-      ? compNames
-      : (hasPosCodes ? [''] : posWords);
-    // 相关度闸门用「目标职能家族根词」(产品/运营/设计…)判岗位名，挡住 BOSS 无视
-    // 职位类型筛选硬塞的推荐垃圾。从岗位词提取，没提取到就不设闸（翻到底，靠本地过滤）。
-    const gateTokens = [...new Set((posWords || []).flatMap((p) => familyRootsOf(p).map((r) => r.toLowerCase())))];
 
     // ── 多城并行：一城一标签页（对齐即投「开四个窗口」）──
     //
@@ -730,37 +759,24 @@ async function runRecall(config = {}) {
     const sources = new Set();
     const perCity = {};
     let lastStop = 'exhausted';
-    let done = 0;
 
     // 精投不再全网搜公司名（那是全文检索，必带别家公司）。它走「公司→岗位→地点」：
     // 直接解析 brandId → 翻公司主页 → 职位类型+城市筛，全部在 augmentFromCompanyPages 里做。
-    // 所以这里的「关键词×城市」搜索只给海投跑。
-    if (mode === 'position') await runInBatches(cities, CONFIG.MAX_PARALLEL_TABS, async (cityCode) => {
-      if (state.task.phase === 'aborted') return;
-      // 每个城市把所有搜索词挨个搜一遍（海投=岗位词/按类目浏览）
-      const res = await collectOnCity(searchKeywords, cityCode, config.filters || {}, (p) => {
+    // 海投 v2 走真人链路：主页→搜索框→筛选→滚动读卡，在 runHaitouScroll 里做。
+    if (mode === 'position') {
+      const ht = await runHaitouScroll(config, merged, (p) => {
         setPhase('collecting', {
           progress: {
             ...state.task.progress,
-            round: done, rounds: cities.length,
-            keyword: p.keyword || '按筛选条件', collected: merged.size + (p.count || 0),
+            keyword: (p.city ? p.city + ' · ' : '') + (p.keyword || '按筛选条件'),
+            collected: p.collected,
+            actionsDone: p.actionsDone, actionsBudget: p.actionsBudget,
           },
         });
-      }, gateTokens.length ? gateTokens : null);
-      if (res.source) sources.add(res.source);
-      let added = 0;
-      for (const j of res.jobs || []) if (!merged.has(j.jobId)) { merged.set(j.jobId, j); added++; }
-      perCity[cityCode] = added;
-      if (res.stoppedBy) lastStop = res.stoppedBy;
-      done++;
-      setPhase('collecting', {
-        progress: {
-          ...state.task.progress,
-          round: done, rounds: cities.length,
-          keyword: searchKeywords.join('/') || '按筛选条件', collected: merged.size,
-        },
       });
-    });
+      if (ht && ht.perCity) Object.assign(perCity, ht.perCity);
+      lastStop = 'scroll_done';
+    }
 
     // ── 精投：公司主页直采（已修好模板污染）──
     let companyDiag = null;

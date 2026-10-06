@@ -44,6 +44,9 @@ const MSG = {
   COMPANY_BOX_SEARCH: 'COMPANY_BOX_SEARCH',  // 驱动公司主页「查找职位关键词」框搜索
   COMPANY_DOM_COLLECT: 'COMPANY_DOM_COLLECT',  // 直接读公司招聘页的岗位卡片（不抓接口）
   COMPANY_DOM_PAGE: 'COMPANY_DOM_PAGE',  // 单步：翻一页(可选)+读这一页的卡，由 SW 全局调度
+  DRIVE_HOME_SEARCH: 'DRIVE_HOME_SEARCH', // 海投 v2：驱动 BOSS 首页搜索框搜词（真人链路第 2 步）
+  SCROLL_RESET: 'SCROLL_RESET',         // 海投 v2：清空滚动读卡状态（换词/换城时）
+  COLLECT_ONE_SCROLL: 'COLLECT_ONE_SCROLL', // 海投 v2 单步：读新增卡→滚一屏，节拍由 SW 全局闸掐
   READ_BRAND_DOM: 'READ_BRAND_DOM',  // 从搜索结果页 DOM 里读公司 brandId（不走签名接口，可后台并行）
   CHECK_RISK: 'CHECK_RISK',         // 读页面上的验证码/风控迹象
   GREETING_SWITCH: 'GREETING_SWITCH',   // 读写 BOSS 自带招呼语开关
@@ -86,6 +89,11 @@ const STORE = {
     PANEL_TAB: 'ui:panelTab',
     FILTER_STATE: 'ui:filterState',
     COMPANY_GROUPS: 'ui:companyGroups',
+    ANALYTICS: 'ui:analytics',              // 埋点事件数组（本地后台）
+    ANALYTICS_UPLOADED: 'ui:analyticsUploaded', // 云端上报游标（方案 B 预留）
+    INSTALL_ID: 'ui:installId',             // 匿名安装 ID（算日活去重用，非个人资料）
+    FEEDBACK: 'ui:feedback',                // 客服反馈数组（自由文本+版本/来源页/时间/设备ID）
+    ADMIN_PASS: 'ui:adminPass',             // 数据后台口令的 SHA-256（不存明文）
   },
 };
 
@@ -134,7 +142,7 @@ const CONFIG = {
   // 有公司收完 N 变小，剩下的自动提速。精确到 0.01 秒。
   TASK_HARD_TIMEOUT_MS: 300000,   // 5 分钟硬封顶：总时长到点就停，把已收的落库展示
   // ↓ 旧的全局队列冷却 / 按并行数间隔，全同步上线后不再用（留给老路径兜底）
-  COOLDOWN_MIN_MS: 2000,
+  COOLDOWN_MIN_MS: 4000,               // 面板耗时预估用的冷却均值（与全局行为闸 4~6 秒对齐）
   COOLDOWN_MAX_MS: 6000,
   PARALLEL_INTERVAL: { 1: [4000, 6000], 2: [5000, 7000], 3: [6000, 8000], 4: [6000, 8000] },
   COLLECT_CAP_PER_SEARCH: 450,    // 单个「关键词×城市」最多收这么多（≈BOSS 单搜天花板 ~300-450）
@@ -145,13 +153,25 @@ const CONFIG = {
   // 想要更全就调大倍数，想更快就调小（1 = 只收刚好够一批）。
   RECALL_CAP_MULTIPLIER: 2,       // 召回上限 = SOFT_BATCH_LIMIT × 2 ≈ 150
   // 搜索时长：产品定好的标准值，不再暴露给用户调。召回封顶后搜索会「收够即停」，
-  // 这个分钟数只当安全时间上限（兜底防卡死）+ 行为预算(分钟×10)。
+  // 这个分钟数只当安全时间上限（兜底防卡死）+ 行为预算(分钟×12，ACTIONS_PER_MINUTE)。
   DEFAULT_SEARCH_MINUTES: 5,
   // 列表翻页间隔。固定节奏像机器、容易被判频繁，改成区间随机抖动，更像人、更不触限流。
   // 实测 1.2 秒几页就被封；拉到 4.5~7 秒随机，慢一点但稳。
   PAGE_REQUEST_INTERVAL_MS: 3500,       // 兜底/非翻页场景仍用它
   PAGE_INTERVAL_MIN_MS: 4000,           // 翻页最小间隔 4 秒
   PAGE_INTERVAL_MAX_MS: 6000,           // 翻页最大间隔 6 秒（4~6 秒随机，精确到 0.01 秒）
+  TURN_GATE_MIN_MS: 4000,               // 全局行为闸（精投）：每 4~6 秒随机放行一个行为（用户 2026-10-06 定）
+  TURN_GATE_MAX_MS: 6000,
+  HAITOU_TURN_GATE_MIN_MS: 4000,        // 全局行为闸（海投）：每 4~6 秒随机放行一个滚动行为（用户 2026-10-06 定，与精投同区间）
+  HAITOU_TURN_GATE_MAX_MS: 6000,
+  ACTIONS_PER_MINUTE: 12,               // 行为预算：每分钟 12 个行为（均值 5 秒一个；5 分钟 = 60 个，用户 2026-10-06 定）
+  HAITOU_MAX_TABS: 5,                   // 海投 v2：一城一标签，最多 5 城并行（用户定的上限）
+  // ── 拟人化的分页开关间隔（精投/海投共用）──
+  // 原则：这类行为要模仿人类——人不会同一秒连开 5 个分页，也不会用完瞬间关掉。
+  TAB_OPEN_MIN_MS: 1000,                // 开页闸：每开一个分页全局隔 1~2 秒随机，轮流开不突刺
+  TAB_OPEN_MAX_MS: 2000,
+  TAB_CLOSE_MIN_MS: 1000,               // 关页延迟：用完隔 1~3 秒随机再关，且异步不阻塞下一个
+  TAB_CLOSE_MAX_MS: 3000,
   ROUND_INTERVAL_MS: 6000,        // 换一组搜索条件之间的停顿
   MAX_PARALLEL_TABS: 4,           // 并行搜索的标签页上限（对齐即投：一城一页并行）
   CANDIDATE_CAP: 300,             // 廉价过滤后送去拉 JD 的上限
@@ -212,6 +232,11 @@ const CONFIG = {
   // 简历
   RESUME_IMAGE_MAX: 10,
   RESUME_IMAGES_PER_SEND: 2,
+
+  // 埋点（只保三个数据：日活、海投/精投点击渗透、投递点击渗透）
+  ANALYTICS_ENDPOINT: '',       // 云端上报地址。空 = 仅本地储存（方案 A）；配上即自动批量上报（方案 B）
+  ANALYTICS_MAX_EVENTS: 5000,   // 本地事件封顶，先进先出
+  FEEDBACK_MAX: 500,            // 客服反馈本地封顶，先进先出
 };
 
 // ── 岗位生命周期状态机 ──

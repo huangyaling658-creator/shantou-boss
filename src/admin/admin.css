@@ -1,0 +1,49 @@
+/* 闪投 · 数据后台（内部只读页，独立样式，不依赖 panel.css） */
+* { box-sizing: border-box; }
+body {
+  font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+  background: #f5f5f4; color: #292524;
+  max-width: 880px; margin: 0 auto; padding: 28px 20px 60px;
+  font-size: 14px; line-height: 1.6;
+}
+h1 { font-size: 20px; font-weight: 600; margin: 0 0 4px; }
+h1 .ver { font-size: 12px; font-weight: 400; color: #78716c; }
+h2 { font-size: 15px; font-weight: 600; margin: 0 0 12px; }
+.tip { color: #78716c; font-size: 12.5px; margin: 0 0 20px; }
+.muted { color: #78716c; font-size: 12.5px; font-weight: 400; }
+.err { color: #b91c1c; font-size: 12.5px; margin-top: 8px; }
+
+.card {
+  background: #fff; border: 1px solid #e7e5e4; border-radius: 12px;
+  padding: 18px 20px; margin-bottom: 16px;
+}
+
+input[type=password] {
+  display: block; width: 100%; margin-bottom: 10px;
+  padding: 9px 12px; font-size: 14px;
+  border: 1px solid #d6d3d1; border-radius: 8px; outline: none;
+}
+input[type=password]:focus { border-color: #2563eb; }
+button {
+  padding: 9px 18px; font-size: 14px; cursor: pointer;
+  border: none; border-radius: 8px; background: #2563eb; color: #fff;
+}
+button.ghost { background: #fff; color: #2563eb; border: 1px solid #2563eb; margin-top: 10px; }
+
+.metrics { display: flex; gap: 12px; flex-wrap: wrap; }
+.metric {
+  flex: 1; min-width: 150px; background: #f5f5f4; border-radius: 10px; padding: 12px 14px;
+}
+.metric .m-label { font-size: 12px; color: #78716c; }
+.metric .m-val { font-size: 22px; font-weight: 600; margin: 2px 0; }
+.metric .m-sub { font-size: 11.5px; color: #78716c; }
+
+table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #e7e5e4; }
+th { color: #78716c; font-weight: 500; }
+
+.fb-item { border-bottom: 1px solid #e7e5e4; padding: 10px 0; }
+.fb-item:last-child { border-bottom: none; }
+.fb-meta { font-size: 11.5px; color: #78716c; margin-bottom: 4px; }
+.fb-text { white-space: pre-wrap; word-break: break-word; }
+.fb-empty { color: #78716c; padding: 8px 0; }

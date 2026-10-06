@@ -442,6 +442,123 @@ const Collector = {
     });
   },
 
+  /**
+   * 海投 v2：驱动 BOSS 首页的搜索框搜词（真人链路第 2 步：主页打词点搜索）。
+   * 在 www.zhipin.com 首页执行：填关键词 → 点「搜索」→ 页面自己跳结果页。
+   * 找不到首页搜索框就如实返回 false，由 SW 兜底直接导航结果页 URL。
+   */
+  async driveHomeSearch(keyword) {
+    const input = document.querySelector('input[placeholder*="搜索职位"], .search-input input, input[name="query"], [class*="search"] input[type="text"]');
+    if (!input) return { ok: false, reason: 'no_home_search_box' };
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+    if (setter) setter.call(input, keyword); else input.value = keyword;
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    await U.sleep(300);
+    const btn = [...document.querySelectorAll('button, a.btn, [class*="search-btn"], [class*="btn-search"]')]
+      .find((b) => /^搜\s*索$/.test((b.textContent || '').trim()) && b.offsetHeight > 0);
+    if (btn) btn.click();
+    else input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
+    return { ok: true, via: btn ? 'button' : 'enter' };
+  },
+
+  // ── 海投 v2：滚动读卡（真人链路第 4 步：一路往下滚，一次滚动 = 一个行为）──
+  _scrollSeen: null,
+  resetScroll() { this._scrollSeen = new Map(); },
+
+  /**
+   * 单步：读当前列表里新增的岗位卡 → 向下滚一屏 → 等渲染再读一次。
+   * 冷却节拍由 SW 全局闸统一掐，这里只等渲染、不睡长觉。
+   * 新版结果页是「左卡右 JD」双栏，左栏是自己的滚动容器，找不到就滚 window。
+   * 注意：滚动懒加载只在前台标签触发，SW 调用前负责把标签激活。
+   * 字段补全：读卡只有卡片字段，拿 jobId 查嗅探器的 JOBLIST_META
+   * （页面自己滚动加载时发的请求被嗅探器记下接口级字段），两头都占。
+   * 返回 { ok, jobs(本步新增), newCount, total }。
+   */
+  async collectOneScroll() {
+    if (!this._scrollSeen) this.resetScroll();
+    const seen = this._scrollSeen;
+    const CARD_SELECTORS = ['.job-card-wrapper', 'li.job-card-wrapper', '.job-card-box', '[class*="job-card"]', '.job-list-box li'];
+    const pick = (el, sels) => {
+      for (const s of sels) { const n = el.querySelector(s); if (n && n.textContent.trim()) return n.textContent.trim(); }
+      return '';
+    };
+    const SAL_RE = /\d+(?:\.\d+)?\s*[-~至]\s*\d+(?:\.\d+)?\s*[KkWw万千元](?:[·,、]\s*\d+\s*薪)?(?:\s*\/?\s*(?:小时|[天日周月]))?|\d+(?:\.\d+)?\s*[KkWw万千元]\s*以上|薪资面议|面议/;
+    const pickSalary = (el) => {
+      const byClass = pick(el, ['.job-salary', '.salary', '[class*="salary"]', '.red', 'em']);
+      if (byClass) { const m = byClass.match(SAL_RE); if (m) return m[0]; }
+      const m = (el.innerText || el.textContent || '').match(SAL_RE);
+      return m ? m[0] : (byClass || '');
+    };
+    const metaOf = () => {
+      try { return JSON.parse(document.documentElement.getAttribute(DOM_BRIDGE.JOBLIST_META) || '{}'); } catch (e) { return {}; }
+    };
+    // BOSS 防爬：薪资数字用自定义字体渲染，DOM 读出来是私有区/替换字符
+    // （面板里就显示成 □□□-□□□元/天）。检测到乱码就丢弃 DOM 值，
+    // 让嗅探器从接口 JSON 里抓的真薪资（meta.salaryDesc）兜底。
+    const GARBLE_RE = /[\uE000-\uF8FF\uFFFD]/;
+    const cleanSalary = (s) => (s && !GARBLE_RE.test(s) ? s : '');
+
+    const readNew = () => {
+      let cards = [];
+      for (const sel of CARD_SELECTORS) { cards = document.querySelectorAll(sel); if (cards.length) break; }
+      const meta = metaOf();
+      const out = [];
+      for (const c of cards) {
+        const link = c.querySelector('a[href*="job_detail"]')?.getAttribute('href')
+          || (/job_detail/.test(c.innerHTML) ? (c.querySelector('a')?.getAttribute('href') || '') : '');
+        const jobId = (String(link).match(/job_detail\/([^.?]+)/) || [])[1] || '';
+        if (!jobId || seen.has(jobId)) continue;
+        seen.set(jobId, true);
+        const m = meta[jobId] || {};
+        out.push(this.normalizeJob({
+          encryptJobId: jobId,
+          jobName: pick(c, ['.job-name', '.job-title .job-name', '[class*="job-name"]', '.name']),
+          salaryDesc: cleanSalary(pickSalary(c)) || m.salaryDesc || '',
+          brandName: pick(c, ['.company-name', '[class*="company-name"]', '.company-info .name']) || m.brandName || '',
+          cityName: pick(c, ['.job-area', '.job-area-wrapper', '[class*="job-area"]']) || m.cityName || '',
+          // ↓ 嗅探器补的接口级字段（DOM 卡上没有的）
+          areaDistrict: m.areaDistrict || '',
+          securityId: m.securityId || '',
+          encryptBossId: m.encryptBossId || '',
+          encryptBrandId: m.encryptBrandId || '',
+          brandScaleName: m.brandScaleName || '',
+          brandStageName: m.brandStageName || '',
+          brandIndustry: m.brandIndustry || '',
+          jobLabels: m.jobLabels || [],
+          skills: m.skills || [],
+          welfareList: m.welfareList || null,
+          daysPerWeekDesc: m.daysPerWeekDesc || null,
+          proxyJob: m.proxyJob,
+          anonymous: m.anonymous,
+        }));
+      }
+      return out;
+    };
+
+    // 1) 先收当前屏的新卡
+    const first = readNew();
+
+    // 2) 向下滚一屏：优先找左栏自己的滚动容器，找不到滚 window
+    let box = null;
+    let n = document.querySelector(CARD_SELECTORS[0]) || document.querySelector('[class*="job-card"]');
+    while (n && n !== document.body) {
+      try {
+        const st = getComputedStyle(n);
+        if (n.scrollHeight > n.clientHeight + 80 && /(auto|scroll)/.test(st.overflowY)) { box = n; break; }
+      } catch (e) { /* 忽略 */ }
+      n = n.parentElement;
+    }
+    if (box) box.scrollBy(0, Math.max(300, Math.round(box.clientHeight * 0.9)));
+    else window.scrollBy(0, Math.max(400, Math.round(window.innerHeight * 0.9)));
+    await U.sleep(900);   // 等滚动触发加载 + 新卡渲染
+
+    // 3) 再收滚动后的新卡
+    const second = readNew();
+    const jobs = [...first, ...second];
+    return { ok: true, jobs, newCount: jobs.length, total: seen.size };
+  },
+
   // ── 分页采集 ──────────────────────────────────────────────
 
   /**

@@ -70,6 +70,19 @@
       return await Collector.collectOneDomPage({ turnFirst: !!payload.turnFirst });
     },
 
+    // 海投 v2：首页搜索框驱动（真人链路第 2 步）
+    [MSG.DRIVE_HOME_SEARCH]: async (payload = {}) => {
+      return await Collector.driveHomeSearch(payload.keyword || '');
+    },
+
+    // 海投 v2：换词/换城时清空滚动读卡状态
+    [MSG.SCROLL_RESET]: async () => { Collector.resetScroll(); return { ok: true }; },
+
+    // 海投 v2 单步：读新增卡 → 滚一屏。节拍由 SW 全局闸掐；SW 负责先激活标签。
+    [MSG.COLLECT_ONE_SCROLL]: async () => {
+      return await Collector.collectOneScroll();
+    },
+
     [MSG.CHECK_RISK]: async () => ({ ok: true, ...Collector.checkRisk() }),
 
     // 抓筛选项字典。三个来源各自独立，任一失败不影响其余

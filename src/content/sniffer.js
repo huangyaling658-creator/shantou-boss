@@ -36,6 +36,33 @@
 
   const isJoblist = (url) => JOBLIST_PATTERNS.some((p) => String(url).includes(p));
 
+  const kindOf = (url) => String(url).includes('search/joblist') ? 'search'
+    : String(url).includes('company/job/list') ? 'company' : 'recommend';
+
+  // ── 人类行为记录（临时调试：学习海投的真人操作链路用）──
+  // 按时间顺序记下本页的「点击 + 列表请求」，跑完一次真人操作后在 Console 执行：
+  //   copy(document.documentElement.getAttribute('data-jt-req-log'))
+  // 把 JSON 发给开发侧分析：真人翻页节奏、每页 page/pageSize 参数、
+  // 单搜实际能翻几页、点击→请求的对应关系。只读不写，不影响任何采集逻辑。
+  const ATTR_LOG = 'data-jt-req-log';
+  function noteLog(entry) {
+    try {
+      let arr = [];
+      try { arr = JSON.parse(document.documentElement.getAttribute(ATTR_LOG) || '[]'); } catch (e) {}
+      arr.push(entry);
+      if (arr.length > 200) arr = arr.slice(-200);
+      document.documentElement.setAttribute(ATTR_LOG, JSON.stringify(arr));
+    } catch (e) { /* 忽略 */ }
+  }
+  document.addEventListener('click', function (ev) {
+    try {
+      const el = ev.target && ev.target.closest ? ev.target.closest('a,button,li,span') : null;
+      if (!el) return;
+      const txt = String(el.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 40);
+      noteLog({ t: 'click', ts: Date.now(), tag: el.tagName.toLowerCase(), cls: String(el.className || '').slice(0, 50), txt });
+    } catch (e) { /* 忽略 */ }
+  }, true);
+
   // 调试：把页面发出的所有 /wapi/ 请求 URL 滚动记下来（最近12条），
   // 用来排查「某页到底调了哪个接口」——比如公司招聘页的职位列表接口是什么。
   function noteDebugUrl(url) {
@@ -162,6 +189,7 @@
 
     noteDebugUrl(url);
     if (isJoblist(url)) {
+      const reqTs = Date.now();
       saveTemplate(url, method, body);
       // clone 后再读，绝不能消费掉页面自己要用的那份 body
       p.then((res) => {
@@ -169,6 +197,16 @@
           res.clone().json().then((json) => {
             noteError(json, url);
             harvestMeta(json);
+            try {
+              const list = json?.zpData?.jobList || json?.zpData?.jobCardList || json?.zpData?.list || [];
+              const pm = String(url).match(/[?&]page=(\d+)/);
+              noteLog({
+                t: 'req', ts: reqTs, dur: Date.now() - reqTs, kind: kindOf(url),
+                url: String(url).slice(0, 400), method, page: pm ? +pm[1] : null,
+                code: json?.code, count: Array.isArray(list) ? list.length : 0,
+                hasMore: json?.zpData?.hasMore !== false, href: location.href.slice(0, 300),
+              });
+            } catch (e) { /* 忽略 */ }
           }).catch(() => {});
         } catch (e) { /* 忽略 */ }
       }).catch(() => {});
@@ -189,12 +227,23 @@
     const info = this.__jt;
     if (info) noteDebugUrl(info.url);
     if (info && isJoblist(info.url)) {
+      const reqTs = Date.now();
       saveTemplate(info.url, info.method, typeof body === 'string' ? body : '');
       this.addEventListener('load', function () {
         try {
           const json = JSON.parse(this.responseText);
           noteError(json, info.url);
           harvestMeta(json);
+          try {
+            const list = json?.zpData?.jobList || json?.zpData?.jobCardList || json?.zpData?.list || [];
+            const pm = String(info.url).match(/[?&]page=(\d+)/);
+            noteLog({
+              t: 'req', ts: reqTs, dur: Date.now() - reqTs, kind: kindOf(info.url),
+              url: String(info.url).slice(0, 400), method: info.method, page: pm ? +pm[1] : null,
+              code: json?.code, count: Array.isArray(list) ? list.length : 0,
+              hasMore: json?.zpData?.hasMore !== false, href: location.href.slice(0, 300),
+            });
+          } catch (e) { /* 忽略 */ }
         } catch (e) { /* 非 JSON 响应，忽略 */ }
       });
     }

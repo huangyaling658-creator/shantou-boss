@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>闪投 · 数据后台</title>
+  <link rel="stylesheet" href="admin.css">
+</head>
+<body>
+
+<h1>闪投 · 数据后台 <span class="ver" id="ver"></span></h1>
+<p class="tip">只读页 · 口令保护（v1 不做账号/权限）· 数据为本机采集，匿名设备 ID 去重</p>
+
+<!-- 口令闸：首次设置 / 之后登录 -->
+<div id="gate" class="card">
+  <div id="gate-setup" hidden>
+    <h2>首次使用：设置后台口令</h2>
+    <p class="muted">口令只存 SHA-256 哈希、不存明文。忘记口令只能清扩展数据重来，请记好。</p>
+    <input type="password" id="setup-p1" placeholder="设置口令（至少 4 位）">
+    <input type="password" id="setup-p2" placeholder="再输一次">
+    <button id="btn-setup">设置并进入</button>
+  </div>
+  <div id="gate-login" hidden>
+    <h2>输入口令</h2>
+    <input type="password" id="login-p" placeholder="后台口令">
+    <button id="btn-login">进入</button>
+    <div class="err" id="login-err" hidden>口令不对</div>
+  </div>
+</div>
+
+<!-- 主内容：三指标 + 逐日明细 + 客服反馈 -->
+<div id="main" hidden>
+
+  <section class="card">
+    <h2>核心指标（近 30 天）</h2>
+    <div class="metrics" id="metrics"></div>
+    <button id="btn-export-stats" class="ghost">导出近 90 天埋点 CSV</button>
+  </section>
+
+  <section class="card">
+    <h2>逐日明细（近 30 天）</h2>
+    <table id="daily">
+      <thead><tr><th>日期</th><th>日活</th><th>海投点击</th><th>海投渗透</th><th>精投点击</th><th>精投渗透</th><th>投递点击</th><th>投递渗透</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <section class="card">
+    <h2>客服反馈 <span class="muted" id="fb-count"></span></h2>
+    <div id="fb-list"></div>
+    <button id="btn-export-fb" class="ghost">导出反馈 CSV</button>
+  </section>
+
+</div>
+
+<script src="../shared/constants.js"></script>
+<script src="../shared/tracker.js"></script>
+<script src="admin.js"></script>
+</body>
+</html>

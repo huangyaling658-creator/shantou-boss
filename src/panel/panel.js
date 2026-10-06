@@ -78,16 +78,16 @@ const HOT_CITIES = [
   { code: '101020100', label: '上海' }, { code: '101280100', label: '广州' },
   { code: '101280600', label: '深圳' }, { code: '101210100', label: '杭州' },
   { code: '101270100', label: '成都' }, { code: '101200100', label: '武汉' },
-  { code: '101190100', label: '南京' }, { code: '101230200', label: '苏州' },
+  { code: '101190100', label: '南京' }, { code: '101190400', label: '苏州' },
 ];
 const MORE_CITIES = [
-  { code: '101020900', label: '合肥' }, { code: '101250100', label: '长沙' },
+  { code: '101220100', label: '合肥' }, { code: '101250100', label: '长沙' },
   { code: '101040100', label: '重庆' }, { code: '101110100', label: '西安' },
   { code: '101030100', label: '天津' }, { code: '101120100', label: '济南' },
   { code: '101120200', label: '青岛' }, { code: '101070100', label: '沈阳' },
   { code: '101230200', label: '厦门' }, { code: '101280700', label: '珠海' },
-  { code: '101280800', label: '东莞' }, { code: '101210400', label: '宁波' },
-  { code: '101190400', label: '无锡' }, { code: '101180100', label: '郑州' },
+  { code: '101281600', label: '东莞' }, { code: '101210400', label: '宁波' },
+  { code: '101190200', label: '无锡' }, { code: '101180100', label: '郑州' },
 ];
 
 // ── 各筛选项的选项表 ──
@@ -855,6 +855,7 @@ function renderMode() {
 document.querySelectorAll('#search-mode .pill').forEach((p) => {
   p.addEventListener('click', () => {
     S.searchMode = p.dataset.mode;
+    Tracker.track('mode_click', { mode: S.searchMode });   // 埋点：海投/精投点击渗透
     renderMode();
     saveConfig();
   });
@@ -865,7 +866,7 @@ document.querySelectorAll('#search-mode .pill').forEach((p) => {
 // ════════════════════════════════════════════════════════════
 
 // ── 精投耗时预估 ──
-// 一个「公司×词」是一个单位。单位内翻 8~10 页、每页 4~8 秒 + 固定开销。
+// 一个「公司×词」是一个单位。单位内翻 8~10 页、每页 4~6 秒 + 固定开销。
 // 单元数 = 公司数 × max(词数,1)。总时长按单元算，供开搜前预告 + 搜索中倒推。
 // 按「全局冷却队列」模型估时：翻页是全局串行的(每次翻页前过一个随机冷却闸)，
 // 所以总翻页耗时 = 总翻页数 × 冷却均值，【不除以并行数】。第 1 页不占冷却。
@@ -1057,6 +1058,7 @@ async function runSendFromResult() {
     toast('自定义模式下，请先在上面填一条招呼语', 4000);
     return;
   }
+  Tracker.track('send_click', { via: 'custom' });   // 埋点：一键投递点击渗透
   S.busy = true;
   $('btn-action').disabled = true;
   $('btn-action').textContent = '准备中…';
@@ -1159,11 +1161,11 @@ async function runSearch() {
       companyAliases: sendCompanies.flatMap((c) => c.aliases),
       positions: S.positions,
       cities: S.cities.map((c) => c.code),
-      cityNames: S.cities.map((c) => c.name).filter(Boolean),   // 精投本地按城市名筛用
+      cityNames: S.cities.map((c) => c.name || c.label).filter(Boolean),   // 精投本地按城市名筛用（城市条目只有 label 字段，之前读 c.name 永远为空）
       filters,
       searchOverrides: S.searchOverrides,   // 手动改过的搜寻名，这些公司用它去定位
       brandOverrides: S.brandOverrides,     // 贴网址锁定的主页 brandId，直接用、跳过定位
-      searchMinutes: S.searchMinutes,       // 搜索时长(分钟)，决定时间上限 + 行为预算(分钟×10)
+      searchMinutes: S.searchMinutes,       // 搜索时长(分钟)，决定时间上限 + 行为预算(分钟×12)
     });
     // 这里保持 busy=true、按钮停在「停止」，直到 'done'/'error'/'aborted' 广播
   } catch (e) {
@@ -1456,6 +1458,29 @@ function companyBucketOf(job) {
   return best || '其他';
 }
 
+// ── 公司名 → 官网招聘页（共笔条目 1/2，仅精投模式生效）──
+// 匹配键 = 显示名/搜索名/别名，向前包含（公司名以键开头），最长键优先。
+// 命中 → 新分页打开官网招聘页；未命中 → Bing 搜索「公司名 官网 招聘」兜底。
+let _careersKeys = null;
+function careersUrlOf(companyName) {
+  const cn = String(companyName || '').trim();
+  if (!cn) return null;
+  if (!_careersKeys) {
+    _careersKeys = [];
+    for (const c of (typeof COMPANY_LIB !== 'undefined' ? COMPANY_LIB : [])) {
+      if (!c.url) continue;
+      const keys = [c.n, c.s, ...(c.a || [])].filter(Boolean);
+      for (const k of keys) _careersKeys.push({ k: String(k).toLowerCase(), url: c.url });
+    }
+    _careersKeys.sort((x, y) => y.k.length - x.k.length); // 最长键优先
+  }
+  const low = cn.toLowerCase();
+  for (const e of _careersKeys) {
+    if (low.startsWith(e.k)) return { url: e.url, official: true };
+  }
+  return { url: 'https://www.bing.com/search?q=' + encodeURIComponent(cn + ' 官网 招聘'), official: false };
+}
+
 function buildJobCard(j) {
   const on = S.selected.has(j.jobId);
   const el = document.createElement('div');
@@ -1464,11 +1489,20 @@ function buildJobCard(j) {
 
   // 只保留公司名 + 薪资（对齐同类产品）。资历、学历要求按用户要求不显示。
   const custom = S.jobGreet?.[j.jobId] || '';
+  // 精投（锁公司）模式下公司名可点击 → 官网招聘页 / 搜索兜底（共笔条目 1/2）
+  let companyHtml = esc(j.companyName || '');
+  if (S.searchMode === 'company' && j.companyName) {
+    const c = careersUrlOf(j.companyName);
+    if (c) {
+      const tip = c.official ? '官网招聘页' : '搜索兜底（未收录官网，Bing 搜索）';
+      companyHtml = `<a class="jcompany-link" href="${esc(c.url)}" target="_blank" rel="noopener noreferrer" title="${tip}">${esc(j.companyName)}</a>`;
+    }
+  }
   el.innerHTML = `
     <label class="jcheck"><input type="checkbox" ${on ? 'checked' : ''}></label>
     <div class="body">
       <div class="jname">${esc(j.jobName)}</div>
-      <div class="jcompany">${esc(j.companyName || '')}</div>
+      <div class="jcompany">${companyHtml}</div>
       <div class="jsalary">${esc(j.salaryDesc || '薪资面议')}</div>
       <div class="jgreet-toggle">单岗位－自定义招呼语 <span class="tri">▾</span></div>
       <textarea class="jgreet" rows="3" hidden>${esc(custom)}</textarea>
@@ -1922,6 +1956,7 @@ function renderGreetings() {
 
 async function runSend() {
   // 不再弹确认框；也不切走页面——就在当前岗位列表页顶部叠一条投递进度（对齐即投）。
+  Tracker.track('send_click', { via: 'ai' });   // 埋点：一键投递点击渗透
   S.busy = true;
   S.sending = true;
   S.sendPaused = false;
@@ -2073,6 +2108,30 @@ $('btn-service').addEventListener('click', openService);
 $('service-close').addEventListener('click', closeService);
 $('service-mask').addEventListener('click', closeService);
 
+// 客服反馈提交（需求#5）：自由文本必填 + 联系方式选填，
+// 自动带版本号/来源页/时间/设备 ID。存本地 ui:feedback，数据后台只读查看。
+$('fb-submit').addEventListener('click', async () => {
+  const text = $('fb-text').value.trim();
+  if (!text) { toast('先写点内容再提交'); return; }
+  try {
+    const st = await chrome.storage.local.get(STORE.UI.FEEDBACK);
+    const arr = Array.isArray(st[STORE.UI.FEEDBACK]) ? st[STORE.UI.FEEDBACK] : [];
+    arr.push({
+      ts: Date.now(),
+      text,
+      contact: $('fb-contact').value.trim(),
+      version: chrome.runtime.getManifest().version,
+      source: S.screen,
+      uid: await Tracker.uid(),
+    });
+    while (arr.length > (CONFIG.FEEDBACK_MAX || 500)) arr.shift();
+    await chrome.storage.local.set({ [STORE.UI.FEEDBACK]: arr });
+    $('fb-text').value = '';
+    $('fb-contact').value = '';
+    toast('已收到，感谢反馈');
+  } catch (e) { toast('提交失败，请再试一次'); }
+});
+
 // 搜索时长不再让用户调：召回已封顶(单批上限×2≈150)、收够就停，
 // S.searchMinutes 只作为一个安全时间上限兜底（见 constants.DEFAULT_SEARCH_MINUTES）。
 
@@ -2140,6 +2199,45 @@ chrome.runtime.onMessage.addListener((msg) => {
   }
 });
 
+// ════════════════════════════════════════════════════════════
+// 使用统计（埋点本地后台：日活 / 海投·精投点击渗透 / 投递点击渗透）
+// ════════════════════════════════════════════════════════════
+
+async function renderStats() {
+  const box = $('stats-content');
+  if (!box) return;
+  const { days: rows, total } = await Tracker.stats(30);
+  const pct = (a, b) => (b ? `${Math.round((a / b) * 1000) / 10}%` : '—');
+  const today = rows.length ? rows[rows.length - 1] : { dau: 0, ht: 0, jt: 0, send: 0 };
+  const row = (label, val, sub) =>
+    `<div class="st-row"><span class="st-label">${label}</span><span class="st-val">${val}</span><span class="st-sub">${sub}</span></div>`;
+  box.innerHTML =
+    row('今日日活', today.dau, `近 30 天累计去重 ${total.dau} 人`) +
+    row('海投点击渗透', pct(total.ht, total.dau), `${total.ht}/${total.dau} 人点过`) +
+    row('精投点击渗透', pct(total.jt, total.dau), `${total.jt}/${total.dau} 人点过`) +
+    row('一键投递渗透', pct(total.send, total.dau), `${total.send}/${total.dau} 人点过`);
+}
+
+$('stats-head').addEventListener('click', () => {
+  const body = $('stats-body');
+  body.hidden = !body.hidden;
+  $('stats-head').querySelector('.fold-arrow').textContent = body.hidden ? '▸' : '▾';
+  if (!body.hidden) renderStats();
+});
+
+$('btn-stats-export').addEventListener('click', async () => {
+  const csv = await Tracker.exportCsv(90);
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, '0');
+  const stamp = `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+  a.download = `闪投使用统计-${stamp}.csv`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+  toast('已导出 CSV');
+});
+
 (async function boot() {
   // 默认全部「不限」，与同类产品一致。
   // HR 活跃度和工作性质之前是预设好的，现在交还给用户自己点：
@@ -2154,6 +2252,11 @@ chrome.runtime.onMessage.addListener((msg) => {
     S.positions = saved.positions || [];
     S.filters = saved.filters || S.filters;
   }
+  // 城市码自愈（2026-10-06 修过 苏州/无锡/合肥/东莞 四个错码）：历史存档里的选中项
+  // 可能还带着错码，按 label 对齐内置表纠正一次，免得旧错码继续被发给后台。
+  const CODE_BY_LABEL = Object.fromEntries([...HOT_CITIES, ...MORE_CITIES].map((c) => [c.label, c.code]));
+  S.cities = S.cities.map((c) => (CODE_BY_LABEL[c.label] && CODE_BY_LABEL[c.label] !== c.code)
+    ? { ...c, code: CODE_BY_LABEL[c.label] } : c);
   S.searchOverrides = st['jt:searchOverrides'] || {};
   S.brandOverrides = st['jt:brandOverrides'] || {};
   // 搜索时长固定，不再从存储读用户值
@@ -2165,6 +2268,9 @@ chrome.runtime.onMessage.addListener((msg) => {
   renderPositionResult(''); renderPositionChips();
   renderFilters();
   updateAction();
+
+  Tracker.track('panel_open');   // 埋点：使用日活（打开面板即算活跃）
+  renderStats();
 
   try {
     const r = await ask(MSG.GET_RESUME);
