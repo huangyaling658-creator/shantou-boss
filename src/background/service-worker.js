@@ -20,6 +20,8 @@ importScripts(
 const state = {
   task: null,        // { taskId, phase, progress, startedAt, config }
   csTabId: null,     // 当前使用的 BOSS 标签页
+  stopRequested: false,  // 用户点了停止/暂停。独立于 task.phase——因为发送循环里每投一个都会
+                         // setPhase('sending')，会把 phase='aborted' 刷掉，靠这个标志才叫得停。
 };
 
 // ════════════════════════════════════════════════════════════
@@ -139,6 +141,11 @@ async function collectOnCity(keywords, cityCode, filters, onProgress, gateTokens
   // 全文匹配，捞回大量销售/无关岗，75 个砍剩 14）。改成每个岗位词单独搜一轮，
   // 每轮都是精确匹配，命中率高、垃圾少；多个词的结果并集起来，总量也更大。
   const kws = keywords.length ? keywords : [''];
+  // 每个岗位词召回封顶：单批只投 SOFT_BATCH_LIMIT 个，一个岗位词收到它的
+  // RECALL_CAP_MULTIPLIER 倍(默认 2×≈150)就够精筛挑了。按 ~15 条/页折算成翻页数，
+  // 别一路翻到 BOSS 天花板(~450)白耗时间。
+  const recallCap = (CONFIG.SOFT_BATCH_LIMIT || 75) * (CONFIG.RECALL_CAP_MULTIPLIER || 2);
+  const kwPages = Math.max(1, Math.min(CONFIG.MAX_PAGES, Math.ceil(recallCap / 15)));
   const first = buildSearchUrl({ ...filters, query: kws[0], city: cityCode });
   console.log('[闪投] 开搜:', first);
   // ★ active:true —— 前台标签页 BOSS 会话/签名才完整，后台会 code_19。
@@ -159,7 +166,7 @@ async function collectOnCity(keywords, cityCode, filters, onProgress, gateTokens
     if (!ready) return { jobs: [], stoppedBy: 'cs_not_ready', source: null };
 
     for (let ki = 0; ki < kws.length; ki++) {
-      if (state.task.phase === 'aborted') { lastStop = 'aborted'; break; }
+      if (state.stopRequested || state.task.phase === 'aborted') { lastStop = 'aborted'; break; }
       if (ki > 0) {
         // 换关键词：在同一个标签页里导航到下一个词的搜索页
         await chrome.tabs.update(tabId, { url: buildSearchUrl({ ...filters, query: kws[ki], city: cityCode }) });
@@ -177,7 +184,7 @@ async function collectOnCity(keywords, cityCode, filters, onProgress, gateTokens
 
       let res;
       try {
-        res = await askTab(tabId, MSG.COLLECT_PAGES, { maxPages: CONFIG.MAX_PAGES, relevance });
+        res = await askTab(tabId, MSG.COLLECT_PAGES, { maxPages: kwPages, relevance });
       } catch (e) {
         res = { jobs: [], stoppedBy: 'error:' + String(e.message || e).slice(0, 30) };
       }
@@ -308,6 +315,9 @@ async function augmentFromCompanyPages(merged, config, onProgress) {
   // N 变小、剩下的自动提速。满 TASK_HARD_TIMEOUT_MS（5 分钟，从任务开始算）就停、把已收的展示。
   const timeUp = () => Date.now() >= taskDeadline;   // 5 分钟硬封顶（含解析阶段，见上）
   const pagesCap = () => U.randInt(CONFIG.COMPANY_PAGES_MIN || 10, CONFIG.COMPANY_PAGES_MAX || 15);
+  // 每家公司召回封顶：单批只投 SOFT_BATCH_LIMIT 个，一家收到它的 RECALL_CAP_MULTIPLIER 倍
+  // (默认 2×≈150)就够精筛挑了，到量就停这家、不再往下翻，省时间。
+  const perCompanyCap = (CONFIG.SOFT_BATCH_LIMIT || 75) * (CONFIG.RECALL_CAP_MULTIPLIER || 2);
 
   // 把一页卡入库：全局 merged 去重 + slot 自己的 seen；返回这页给「这家」新增了几个
   const absorb = (slot, res) => {
@@ -316,11 +326,14 @@ async function augmentFromCompanyPages(merged, config, onProgress) {
       if (!j.companyName) j.companyName = slot.company;
       if (!j.jobId) continue;
       if (!slot.seen.has(j.jobId)) { slot.seen.add(j.jobId); nSlot++; }
+      if (slot.companySeen) slot.companySeen.add(j.jobId);   // 这家公司累计收到的（跨岗位词，用于封顶）
       if (!merged.has(j.jobId)) { j._fromCompanyPage = true; merged.set(j.jobId, j); added++; }
     }
     return nSlot;
   };
-  const kwExhausted = (slot) => !slot.lastHasNext || slot.page >= slot.maxPages || slot.lastNew === 0;
+  // 翻到底 / 到页数上限 / 这页没新增 / 这家已收够封顶量 —— 任一满足就停翻这个词
+  const kwExhausted = (slot) => !slot.lastHasNext || slot.page >= slot.maxPages || slot.lastNew === 0
+    || (slot.companySeen && slot.companySeen.size >= perCompanyCap);
   // 关标签：不秒删，隔 1~3 秒随机再删；而且是后台异步的（不 await），下一家不用等删完就能开始
   const closeSlot = (slot) => {
     if (!slot || !slot.tabId) return;
@@ -349,7 +362,7 @@ async function augmentFromCompanyPages(merged, config, onProgress) {
     if (at > now) await U.sleep(at - now);
     actionsDone++;
   };
-  const stop = () => state.task.phase === 'aborted' || timeUp();
+  const stop = () => state.stopRequested || state.task.phase === 'aborted' || timeUp();
 
   const ready = async (tabId) => {   // 等页面加载 + content script 就绪
     await waitForTabComplete(tabId);
@@ -359,7 +372,7 @@ async function augmentFromCompanyPages(merged, config, onProgress) {
 
   // 单次完整跑一家：定位 brandId → 进公司页 → 逐词搜职位。返回 {located, pages}。
   const onePass = async (t) => {
-    const slot = { company: t.company, brandId: t.brandId, tabId: null, kwi: 0, page: 0, seen: new Set(), maxPages: pagesCap(), lastHasNext: false, lastNew: 0 };
+    const slot = { company: t.company, brandId: t.brandId, tabId: null, kwi: 0, page: 0, seen: new Set(), companySeen: new Set(), maxPages: pagesCap(), lastHasNext: false, lastNew: 0 };
     let pagesTotal = 0, located = false;
     activeCount++;
     try {
@@ -374,11 +387,15 @@ async function augmentFromCompanyPages(merged, config, onProgress) {
           // 定位只搜公司名、不带职位/城市筛选：否则小公司加了职位筛选后搜不出几条，
           // 页面被「推荐其他公司」占满，/gongsi/ 投票会投到别家 → 定位到错公司。
           const url = buildSearchUrl({ query: cands[ci] });
-          if (!slot.tabId) { const tab = await chrome.tabs.create({ url, active: false }); slot.tabId = tab.id; }
-          else { await chrome.tabs.update(slot.tabId, { url }); }
+          // ★ 定位这步必须用【前台】标签页：BOSS 的职位列表是 SPA，后台标签页被 Chrome
+          // 渲染节流，列表常在我们读取时还没渲染出来 → 读到 0 张卡 → 定位失败（腾讯就栽在这）。
+          // 前台加载完整、渲染及时，和海投路径/resolveBrandId 的做法一致。定位完会切回后台开公司页。
+          if (!slot.tabId) { const tab = await chrome.tabs.create({ url, active: true }); slot.tabId = tab.id; }
+          else { await chrome.tabs.update(slot.tabId, { url, active: true }); }
           await ready(slot.tabId);
           const names = [t.company, t.searchName, ...(t.aliases || [])].filter(Boolean);   // 按公司名匹配，排除推荐的别家
-          for (let k = 0; k < 3 && !brandId; k++) {
+          // 轮询读取：SPA 渲染有快有慢，最多等 ~6.4 秒（8 次 ×0.8s），一拿到 brandId 立刻停。
+          for (let k = 0; k < 8 && !brandId; k++) {
             const r = await askTab(slot.tabId, MSG.READ_BRAND_DOM, { names }).catch(() => null);
             brandId = r && r.brandId;
             if (!brandId) await U.sleep(800);
@@ -401,6 +418,7 @@ async function augmentFromCompanyPages(merged, config, onProgress) {
 
       for (slot.kwi = 0; slot.kwi < queries.length; slot.kwi++) {
         if (stop()) break;
+        if (slot.companySeen.size >= perCompanyCap) break;   // 这家已收够，剩下的岗位词不用再搜
         const q = queries[slot.kwi] || '';
         slot.page = 0; slot.seen = new Set(); slot.maxPages = pagesCap();
         if (q) { await askTab(slot.tabId, MSG.COMPANY_BOX_SEARCH, { keyword: q }).catch(() => {}); await U.sleep(800); }
@@ -645,6 +663,7 @@ async function runRecall(config = {}) {
   if (state.task && !['done', 'error', 'aborted'].includes(state.task.phase)) {
     throw new Error('task_already_running');
   }
+  state.stopRequested = false;   // 新一轮搜索，清掉上次的停止标志
 
   state.task = {
     taskId: newTaskId(),
@@ -957,6 +976,7 @@ async function runGreeting(jobIds, opts) {
 }
 
 async function doGreeting(jobIds, opts = {}) {
+  state.stopRequested = false;   // 新一轮生成，清掉上次的停止标志
   const mode = opts.mode || 'ai';          // ai | custom
   const globalGreet = (opts.globalGreet || '').trim();
   const jobGreet = opts.jobGreet || {};
@@ -1012,7 +1032,7 @@ async function doGreeting(jobIds, opts = {}) {
 
   const worker = async () => {
     while (queue.length) {
-      if (state.task.phase === 'aborted') return;
+      if (state.stopRequested || state.task.phase === 'aborted') return;
       const job = queue.shift();
 
       // 抓 JD（后台 HTML 抓取，不导航、不抢焦点）
@@ -1105,6 +1125,17 @@ async function runSend(jobIds) {
   }
 }
 
+// 分片睡眠：每 500ms 查一次停止标志，停了就提前返回 true（让调用方 break）。
+// 用于投递间隔/批次休息这些长 sleep，保证点「停止」能秒停，不用等满 90 秒。
+async function sleepUnlessStopped(ms) {
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    if (state.stopRequested) return true;
+    await U.sleep(Math.min(500, end - Date.now()));
+  }
+  return state.stopRequested;
+}
+
 async function doSend(jobIds) {
   const hour = new Date().getHours();
   if (CONFIG.FORBIDDEN_HOURS.includes(hour)) {
@@ -1114,6 +1145,17 @@ async function doSend(jobIds) {
   const risk = await riskLevel();
   if (risk.level === 'stop') {
     throw new Error(`12 小时内已经触发 ${risk.count} 次验证码，先停一停，等冷却过了再投`);
+  }
+
+  // 发送顺序：已生成招呼语的排前面（稳定排序，其余保持传入的显示顺序），对齐「优先发已生成的」。
+  // 传入顺序由面板按界面显示顺序给，所以整体＝显示顺序，但有招呼语的优先。
+  {
+    const withG = [], without = [];
+    for (const id of jobIds) {
+      const j = await Repo.getJob(id);
+      if (j && j.greeting && j.greeting.text) withG.push(id); else without.push(id);
+    }
+    jobIds = [...withG, ...without];
   }
 
   const { batch, daily } = await quotaLeft();
@@ -1138,10 +1180,11 @@ async function doSend(jobIds) {
   const results = [];
   let sent = 0;
 
+  state.stopRequested = false;   // 新一批开始，清掉上一次的停止标志
   state.task = { taskId: newTaskId(), phase: 'sending', startedAt: Date.now(), progress: {} };
 
   for (let i = 0; i < allow; i++) {
-    if (state.task.phase === 'aborted') break;
+    if (state.stopRequested) break;   // 停止/暂停：立刻收手，不再投下一个
 
     const job = await Repo.getJob(jobIds[i]);
     if (!job) continue;
@@ -1189,6 +1232,8 @@ async function doSend(jobIds) {
       if (!click.ok) { log('fail', click.reason); continue; }
       await waitForTabComplete(tabId);
       await U.sleep(2000);   // 让聊天页渲染出来
+
+      if (state.stopRequested) break;   // 打开聊天页后、真正发出前再查一次，停了就别发
 
       // 4. 发招呼语 + 简历截图
       const text = job.greeting?.text || FALLBACK_GREETING;
@@ -1239,15 +1284,17 @@ async function doSend(jobIds) {
     q.sentCount = sent;
     await Repo.putQuota(q);
 
-    // 每 50 个歇 90 秒
+    if (state.stopRequested) break;   // 投完这个若已请求停止，别再进休息/间隔
+
+    // 每 50 个歇 90 秒（分片睡，便于中途停止立刻响应）
     if (sent > 0 && sent % CONFIG.BATCH_SIZE === 0) {
       setPhase('sending', { progress: { ...state.task.progress, resting: true } });
-      await U.sleep(CONFIG.BATCH_REST_MS);
+      if (await sleepUnlessStopped(CONFIG.BATCH_REST_MS)) break;
     }
     if (i < allow - 1) {
-      await U.sleep(U.randInt(
+      if (await sleepUnlessStopped(U.randInt(
         CONFIG.SEND_INTERVAL_MIN_MS * slowFactor,
-        CONFIG.SEND_INTERVAL_MAX_MS * slowFactor));
+        CONFIG.SEND_INTERVAL_MAX_MS * slowFactor))) break;
     }
   }
 
@@ -1347,6 +1394,7 @@ const ROUTES = {
   },
 
   [MSG.STOP_TASK]: async () => {
+    state.stopRequested = true;   // 独立标志，发送循环每轮都查它，不会被 setPhase 覆盖
     if (state.csTabId) {
       await chrome.tabs.sendMessage(state.csTabId, { type: MSG.STOP_TASK }).catch(() => {});
     }

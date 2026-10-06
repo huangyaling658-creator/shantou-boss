@@ -66,12 +66,11 @@ const S = {
   greetMode: 'ai',
   globalGreet: '',
   jobGreet: {},
-  refineTerms: [],       // [{term, on}] 按岗位词拆出的子词，点亮的是或门条件
-  protect75: true,       // 75保护：自动全选封顶在单批上限(75)，默认开；关掉才能选超过
+  refineTerms: [],       // [{term, on}] 结果页按「用户选定的岗位」分桶筛选，点亮=显示该桶
   searchDetailOpen: false, // 「搜索过程与结果」折叠区，默认折叠
   searchOverrides: {},   // 用户手动改过的「搜寻名」（公司名→中文搜寻名），下次搜这家用它去定位
   brandOverrides: {},    // 用户贴公司主页网址抽出的 brandId（公司名→brandId），最优先、跳过定位
-  searchMinutes: 5,      // 搜索时长(分钟)，设置里拉杆调，3~30
+  searchMinutes: (typeof CONFIG !== 'undefined' && CONFIG.DEFAULT_SEARCH_MINUTES) || 5,  // 固定安全时间上限，不再给用户调
 };
 
 const HOT_CITIES = [
@@ -176,24 +175,12 @@ function showScreen(name) {
     $(`screen-${s}`).classList.toggle('on', s === name);
   }
   $('btn-back').hidden = name === 'config';
-  $('btn-forward').hidden = !forwardTarget();   // 有「下一页」可去才显示 →
   // 离开投递屏时收掉「投递中」的底部计数条，别残留到别的页面
   if (name !== 'send') { $('action-count').hidden = true; $('btn-reset').hidden = false; }
   if (name === 'config') renderResumeBar();
   window.scrollTo(0, 0);
   updateAction();
 }
-
-/** 「下一页」要去哪：条件页有结果→回结果页；投递中在结果页→跳投递进度。没有就返回 null（→ 隐藏）。*/
-function forwardTarget() {
-  if (S.screen === 'config' && (S.hasResult || S.busy)) return 'result';
-  if (S.screen === 'result' && S.sending) return 'send';
-  return null;
-}
-$('btn-forward').addEventListener('click', () => {
-  const t = forwardTarget();
-  if (t) showScreen(t);
-});
 
 /** 条件页顶部「返回结果」入口：有结果就显示，点了切回结果页（不丢答案）*/
 function renderResumeBar() {
@@ -377,6 +364,30 @@ function renderCompanies(q = '') {
     }
     box.appendChild(row);
   }
+
+  // 搜不到内置库里的公司？直接把用户输入的名字加进去当目标公司。
+  // 不需要外接搜索接口：投递时会拿这个名字去 BOSS 自己的搜索里反查 brandId
+  // （见 service-worker 的 resolveBrandId），和内置公司走的是同一条路。
+  const raw = q.trim();
+  if (raw) {
+    const dup = S.companies.some((x) => x.name === raw)
+      || COMPANY_LIB.some((c) => c.n.toLowerCase() === kw);
+    if (!dup) {
+      const addRow = document.createElement('div');
+      addRow.className = 'pills';
+      addRow.style.marginTop = '14px';
+      addRow.appendChild(makePill(`+ 添加公司「${raw}」`, false, () => {
+        if (!S.companies.some((x) => x.name === raw)) {
+          S.companies.push({ name: raw, aliases: [raw], search: raw });
+        }
+        $('company-search').value = '';
+        renderCompanies('');
+        renderCompanyChips();
+        saveConfig();
+      }, { dashed: true }));
+      box.appendChild(addRow);
+    }
+  }
 }
 
 function renderCompanyChips() {
@@ -542,13 +553,11 @@ function splitToSubterms(word) {
   return [...out].filter((s) => s.length >= 2);
 }
 function genRefineTerms(positions) {
-  const set = new Set();
-  for (const p of positions || []) for (const s of splitToSubterms(p)) set.add(s);
-  const terms = [...set].map((term) => ({ term, on: true }));
-  // 追加「其他」桶：接住「不含任何子词」的岗位。默认【不点】→ 默认只显示命中子词的；
-  // 「其他 N」带数量摆着，想查那些落空的是误判还是真不相关，点一下就显出来（不偷偷藏）。
-  if (terms.length) terms.push({ term: '其他', on: false, other: true });
-  return terms;
+  // 精筛严格按「用户搜索前选定的岗位」分类，不再衍生出一堆子词 chip。
+  // 子词拆解退到后台（bucketOf 里用 splitToSubterms 把岗位名归桶），
+  // 比如「AIGC产品」「GC产品经理」都会被归进它所属的那个岗位桶，呈现上只保留原始岗位。
+  // 只保留用户选定的岗位作为精筛桶，不再有「其他」——不属于任何选定岗位的岗位直接不展示。
+  return (positions || []).map((term) => ({ term, on: true }));
 }
 
 function togglePosition(p) {
@@ -923,7 +932,8 @@ function updateAction() {
 
   if (S.screen === 'result') {
     // 自定义模式，或 AI 已经生成完 → 直接投递；否则先生成。
-    const n = S.selected.size;
+    // n = 本批实际处理数（选中数按显示顺序封顶在单批上限）
+    const n = Math.min(S.selected.size, SEND_CAP());
     if (S.greetMode === 'custom' || S.greeted) {
       btn.textContent = n ? `一键投递（${n}）` : '一键投递';
     } else {
@@ -934,8 +944,9 @@ function updateAction() {
   }
 
   if (S.screen === 'greeting') {
-    btn.textContent = `投递这 ${S.selected.size} 个岗位`;
-    btn.disabled = S.selected.size === 0 || !S.greeted;
+    const n = Math.min(S.selected.size, SEND_CAP());
+    btn.textContent = `投递这 ${n} 个岗位`;
+    btn.disabled = n === 0 || !S.greeted;
     return;
   }
 
@@ -1052,7 +1063,7 @@ async function runSendFromResult() {
   try {
     // 用自定义模式跑一遍生成（不调 AI，只是把文案落进每个岗位），完成后自动进投递
     await ask(MSG.START_GREETING, {
-      jobIds: [...S.selected],
+      jobIds: batchIds(),
       mode: 'custom',
       globalGreet: S.globalGreet || '',
       jobGreet: S.jobGreet || {},
@@ -1391,7 +1402,7 @@ async function loadResults() {
   // 默认全选当前可见(精筛后)的岗位
   renderUploads();   // 结果页顶部也放简历，跟即投一致
   renderRefineBar();
-  selectVisibleCapped();   // 默认全选可见（75保护封顶）
+  selectAllVisible();   // 默认全选可见（发送时才按顺序取前 75）
   renderJobs();
   $('result-body').hidden = S.jobs.length === 0;
   $('search-empty').hidden = S.jobs.length > 0;
@@ -1413,39 +1424,22 @@ async function loadResults() {
  *   其次：岗位名包含某个岗位词的核心词（AI训练师 核心词=训练师）
  *   都不满足：其他
  */
-// 跟后端 tokensOfPosition 保持一致：把关键词按 / 、,，空格 拆成多个 token
-const GROUP_GENERIC = new Set(['ai', 'aigc', 'agent', '智能', '数据', '高级', '资深', '初级', '专员', '经理', '工程师', '师', '端']);
-function tokensOfPosition(position) {
-  const phrases = position.toLowerCase().split(/[\/、,，\s]+/).filter(Boolean);
-  const tokens = new Set();
-  for (const ph of phrases) {
-    if (ph.length >= 2) tokens.add(ph);
-    const parts = ph.match(/[a-z0-9]{2,}|[一-龥]{2,}/g) || [];
-    for (const p of parts) if (p.length >= 2) tokens.add(p);
-  }
-  const strong = [...tokens].filter((t) => !GROUP_GENERIC.has(t));
-  return strong.length ? strong : [...tokens];
-}
-
+/**
+ * 把一个岗位严格归到「用户选定的某个岗位」下（或「其他」）。
+ * 用每个选定岗位拆出的子词（splitToSubterms：全词 / 去头 / 保头去尾 等）去匹配岗位名，
+ * 命中子词最长的那个岗位胜出——这样「AIGC产品」「AIGC产品经理」会一起落进「AIGC产品经理」桶，
+ * 而「AI产品经理」因为能命中更长的「AI产品经理」子词，不会被误并到别处。
+ */
 function bucketOf(job) {
   const name = (job.jobName || '').toLowerCase();
-
-  // 1. 完整岗位词命中，取最长（最具体）的那个
-  let full = null; let fullLen = 0;
+  let best = '其他'; let bestLen = 0;
   for (const p of S.positions) {
-    const lp = p.toLowerCase();
-    if (name.includes(lp) && lp.length > fullLen) { fullLen = lp.length; full = p; }
-  }
-  if (full) return full;
-
-  // 2. token 命中：归到「命中的最长 token」所属的岗位词
-  let best = null; let bestLen = 0;
-  for (const p of S.positions) {
-    for (const t of tokensOfPosition(p)) {
-      if (name.includes(t) && t.length > bestLen) { bestLen = t.length; best = p; }
+    for (const s of splitToSubterms(p)) {
+      const ls = s.toLowerCase();
+      if (ls && name.includes(ls) && ls.length > bestLen) { bestLen = ls.length; best = p; }
     }
   }
-  return best || '其他';
+  return best;
 }
 
 /** 锁定公司模式：把岗位归到匹配的那家目标公司（按公司名/别名包含匹配）*/
@@ -1481,17 +1475,11 @@ function buildJobCard(j) {
     </div>`;
 
   el.querySelector('input').addEventListener('change', (e) => {
-    if (e.target.checked) {
-      // 75保护开着且已到上限：不让再勾，提示一下
-      if (S.protect75 && !S.selected.has(j.jobId) && S.selected.size >= SEND_CAP()) {
-        e.target.checked = false;
-        toast(`75保护：单批最多选 ${SEND_CAP()} 个，关掉保护可超过`, 3500);
-        return;
-      }
-      S.selected.add(j.jobId);
-    } else S.selected.delete(j.jobId);
+    // 选择不设上限（上限只在发送时按顺序取前 75）；单个勾选随意。
+    if (e.target.checked) S.selected.add(j.jobId);
+    else S.selected.delete(j.jobId);
     el.classList.toggle('off', !e.target.checked);
-    syncSelectAll();
+    syncGroupChecks();   // 轻量更新各公司组全选框的勾/半选状态，不整列重绘
     updateAction();
   });
   const ta = el.querySelector('.jgreet');
@@ -1509,78 +1497,114 @@ function buildJobCard(j) {
 
 /** 精筛后可见的岗位：岗位名含「任一点亮的子词」(或门)才留。
  *  没有子词可筛(没岗位词)→ 全给；有子词但一个都没点亮 → 0 个。 */
-// ── 75保护：自动选中封顶在单批上限 ──
+// ── 单批上限：选择不设限，上限只在「生成招呼语/发送」时按显示顺序取前 SEND_CAP 个 ──
 const SEND_CAP = () => CONFIG.SOFT_BATCH_LIMIT || 75;
-function selectVisibleCapped() {   // 全选可见：开了保护只选前 SEND_CAP 个
-  const vis = visibleJobs().map((j) => j.jobId);
-  S.selected = new Set(S.protect75 ? vis.slice(0, SEND_CAP()) : vis);
+/** 全选当前可见岗位（不封顶，封顶留到发送时）。*/
+function selectAllVisible() {
+  S.selected = new Set(visibleJobs().map((j) => j.jobId));
 }
-function enforceCap() {             // 加选后超额就裁回（按可见顺序保前面的）
-  if (!S.protect75 || S.selected.size <= SEND_CAP()) return;
-  const keep = visibleJobs().filter((j) => S.selected.has(j.jobId)).slice(0, SEND_CAP()).map((j) => j.jobId);
-  S.selected = new Set(keep);
+
+/** 选中岗位按「界面显示顺序」(分组后的先后)排列的 jobId 列表。*/
+function orderedSelectedIds() {
+  const shown = visibleJobs();
+  const ordered = [];
+  if (S.searchMode === 'company' && S.companies.length) {
+    const groups = new Map(S.companies.map((c) => [c.name, []]));
+    for (const j of shown) { const g = groups.get(companyBucketOf(j)); if (g) g.push(j); }
+    for (const [, arr] of groups) ordered.push(...arr);
+  } else if (S.positions.length) {
+    const groups = new Map(S.positions.map((p) => [p, []]));
+    for (const j of shown) { const g = groups.get(bucketOf(j)); if (g) g.push(j); }
+    for (const [, arr] of groups) ordered.push(...arr);
+  } else {
+    ordered.push(...shown);
+  }
+  return ordered.filter((j) => S.selected.has(j.jobId)).map((j) => j.jobId);
 }
+/** 本批真正要处理的岗位：按显示顺序取前 SEND_CAP 个（单批上限，防封号）。*/
+function batchIds() { return orderedSelectedIds().slice(0, SEND_CAP()); }
 
 function visibleJobs() {
   if (!S.refineTerms || !S.refineTerms.length) return S.jobs;   // 没得筛，全给
-  const lit = S.refineTerms.filter((t) => t.on);
-  if (!lit.length) return [];   // 一个词都不点 = 不显示
-  const realTerms = S.refineTerms.filter((t) => !t.other).map((t) => t.term.toLowerCase());
-  const litReal = lit.filter((t) => !t.other).map((t) => t.term.toLowerCase());
-  const otherLit = lit.some((t) => t.other);
-  return S.jobs.filter((j) => {
-    const n = (j.jobName || '').toLowerCase();
-    if (litReal.some((t) => n.includes(t))) return true;                  // 命中任一点亮的子词
-    if (otherLit && !realTerms.some((t) => n.includes(t))) return true;   // 「其他」：不含任何子词
-    return false;
-  });
+  const litPos = new Set(S.refineTerms.filter((t) => t.on).map((t) => t.term));   // 点亮的岗位桶
+  if (!litPos.size) return [];   // 一个岗位都不点 = 不显示
+  // 按岗位桶筛：岗位落在某个点亮的岗位下才显示。不属于任何选定岗位(其他)的一律不显示。
+  return S.jobs.filter((j) => litPos.has(bucketOf(j)));
 }
 
 /** 结果页精筛条：子词 chip（点亮=生效，点灭=不要）+ 加词 */
 function renderRefineBar() {
   const sec = $('refine-sec');
   if (!sec) return;
-  sec.hidden = !(S.jobs && S.jobs.length);   // 有结果就显示（至少放 75保护开关）
-  const pb = $('protect-75'); if (pb) pb.checked = S.protect75;
+  sec.hidden = !(S.jobs && S.jobs.length);   // 有结果就显示
   const box = $('refine-chips');
   box.innerHTML = '';
   const jobs = S.jobs || [];
-  const realTerms = (S.refineTerms || []).filter((t) => !t.other).map((t) => t.term.toLowerCase());
+  // 严格按岗位桶计数：每个岗位只属于一个桶（bucketOf），不再重复计数
+  const counts = new Map();
+  for (const j of jobs) { const b = bucketOf(j); counts.set(b, (counts.get(b) || 0) + 1); }
   for (const t of (S.refineTerms || [])) {
-    const tl = t.term.toLowerCase();
-    const cnt = t.other
-      ? jobs.filter((j) => { const n = (j.jobName || '').toLowerCase(); return !realTerms.some((x) => n.includes(x)); }).length
-      : jobs.filter((j) => (j.jobName || '').toLowerCase().includes(tl)).length;
+    const cnt = counts.get(t.term) || 0;
     const chip = document.createElement('span');
     chip.className = 'pill multi' + (t.on ? ' on' : '');
-    chip.innerHTML = `${esc(t.term)} <b>${cnt}</b>`;   // 标数量：一眼看清这个词圈住几个
+    chip.innerHTML = `${esc(t.term)} <b>${cnt}</b>`;   // 标数量：这个岗位召回了几个
     chip.addEventListener('click', () => { t.on = !t.on; afterRefineChange(); });
     box.appendChild(chip);
   }
+  syncRefineToggle();
+}
+/** 精筛右上角的勾选框 = 控制「所有精筛标签」的全开/全关（不是选岗位）。*/
+function syncRefineToggle() {
+  const box = $('sel-all'); if (!box) return;
+  const terms = S.refineTerms || [];
+  const onN = terms.filter((t) => t.on).length;
+  box.checked = terms.length > 0 && onN === terms.length;
+  box.indeterminate = onN > 0 && onN < terms.length;
 }
 function afterRefineChange() {
-  // 精筛变化后，默认把可见岗位重新全选（75保护封顶；取消不想要的更省力）
-  selectVisibleCapped();
+  // 精筛标签变化只改「显示哪些桶」。被隐藏的桶不会进入发送（batchIds 基于可见岗位）。
+  // 可见集里新冒出来的岗位默认也选上，省得用户再去挨个勾。
+  selectAllVisible();
   renderRefineBar();
   renderJobs();
+}
+
+/** 把可见岗位分组：锁定公司模式按公司分；否则按岗位词分。都没有就返回 null（平铺）。
+ *  不属于任何选定桶的岗位（companyBucketOf/bucketOf 命中不到）直接丢弃，不再有「其他」组。*/
+function jobGroups(shown) {
+  if (S.searchMode === 'company' && S.companies.length) {
+    const g = new Map(S.companies.map((c) => [c.name, []]));
+    for (const j of shown) { const a = g.get(companyBucketOf(j)); if (a) a.push(j); }
+    return g;
+  }
+  if (S.positions.length) {
+    const g = new Map(S.positions.map((p) => [p, []]));
+    for (const j of shown) { const a = g.get(bucketOf(j)); if (a) a.push(j); }
+    return g;
+  }
+  return null;
+}
+
+/** 轻量刷新各公司组全选框的勾/半选状态，不整列重绘（单个岗位勾选后调用）。*/
+function syncGroupChecks() {
+  const groups = jobGroups(visibleJobs());
+  if (!groups) return;
+  for (const head of document.querySelectorAll('#job-list .group-head')) {
+    const name = head.dataset.group;
+    const jobs = groups.get(name) || [];
+    const ids = jobs.map((j) => j.jobId);
+    const allOn = ids.length > 0 && ids.every((id) => S.selected.has(id));
+    const someOn = ids.some((id) => S.selected.has(id));
+    const box = head.querySelector('.group-check input');
+    if (box) { box.checked = allOn; box.indeterminate = someOn && !allOn; }
+  }
 }
 
 function renderJobs() {
   const list = $('job-list');
   list.innerHTML = '';
   const shown = visibleJobs();   // 精筛后的集合
-
-  // 分组：锁定公司模式按公司分；广撒网模式按岗位词分
-  let groups = null;
-  if (S.searchMode === 'company' && S.companies.length) {
-    groups = new Map(S.companies.map((c) => [c.name, []]));
-    groups.set('其他', []);
-    for (const j of shown) groups.get(companyBucketOf(j)).push(j);
-  } else if (S.positions.length > 1) {
-    groups = new Map(S.positions.map((p) => [p, []]));
-    groups.set('其他', []);
-    for (const j of shown) groups.get(bucketOf(j)).push(j);
-  }
+  const groups = jobGroups(shown);
 
   if (groups) {
     S.collapsedGroups = S.collapsedGroups || new Set();
@@ -1589,6 +1613,7 @@ function renderJobs() {
       const collapsed = S.collapsedGroups.has(name);
       const head = document.createElement('div');
       head.className = 'group-head';
+      head.dataset.group = name;
       // 左侧：折叠箭头 + 公司名 + 数量（点这块折叠/展开）；右侧：整组全选框
       const ids = jobs.map((j) => j.jobId);
       const allOn = ids.every((id) => S.selected.has(id));
@@ -1605,8 +1630,9 @@ function renderJobs() {
       });
       const box = head.querySelector('.group-check input');
       box.indeterminate = someOn && !allOn;   // 半选状态
+      // 勾选=这家公司可见岗位全选，不勾=全不选。选择不封顶，发送时才按顺序取前 75。
       box.addEventListener('change', (e) => {
-        if (e.target.checked) { for (const id of ids) S.selected.add(id); enforceCap(); }
+        if (e.target.checked) { for (const id of ids) S.selected.add(id); }
         else { for (const id of ids) S.selected.delete(id); }
         renderJobs();
       });
@@ -1614,10 +1640,10 @@ function renderJobs() {
       if (!collapsed) for (const j of jobs) list.appendChild(buildJobCard(j));   // 折叠时不渲染卡
     }
   } else {
-    for (const j of S.jobs) list.appendChild(buildJobCard(j));
+    for (const j of shown) list.appendChild(buildJobCard(j));
   }
 
-  // 岗位数：精筛开着就显示「精筛后 N / 共 M」，否则只显示总数
+  // 岗位数：精筛收窄后显示「精筛后 N / 共 M」，否则只显示总数
   const shownN = shown.length;
   $('jobs-count').textContent = (shownN !== S.jobs.length)
     ? `精筛后 ${shownN} 个 · 共 ${S.jobs.length}`
@@ -1626,25 +1652,15 @@ function renderJobs() {
     p.classList.toggle('on', p.dataset.mode === S.greetMode);
   });
   $('global-greet').hidden = S.greetMode !== 'custom';
-  syncSelectAll();
+  syncRefineToggle();
   updateAction();
 }
 
-/** 顶部全选框跟随当前勾选状态（针对精筛后可见的岗位）*/
-function syncSelectAll() {
-  const box = $('sel-all');
-  if (!box) return;
-  const vis = visibleJobs();
-  const selVis = vis.filter((j) => S.selected.has(j.jobId)).length;
-  box.checked = vis.length > 0 && selVis === vis.length;
-  box.indeterminate = selVis > 0 && selVis < vis.length;
-}
-
+// 精筛右上角勾选框 = 全开/全关所有精筛标签（控制显示哪些岗位桶，不是选岗位）。
 $('sel-all').addEventListener('change', (e) => {
-  // 只对精筛后可见的岗位做全选/全不选（全选走 75保护封顶）
-  if (e.target.checked) selectVisibleCapped();
-  else for (const id of visibleJobs().map((j) => j.jobId)) S.selected.delete(id);
-  renderJobs();
+  const on = e.target.checked;
+  for (const t of (S.refineTerms || [])) t.on = on;
+  afterRefineChange();
 });
 
 // 「搜索过程与结果」折叠/展开
@@ -1696,14 +1712,6 @@ $('company-status').addEventListener('click', (e) => {
   if (span) span.textContent = `搜寻名：${S.searchOverrides[company] || co.search || company}${S.brandOverrides[company] ? '（已锁定主页）' : ''}`;
 });
 
-// 75保护开关：开 → 把当前选择裁回 75；关 → 放开，可超过
-$('protect-75').addEventListener('change', (e) => {
-  S.protect75 = e.target.checked;
-  if (S.protect75) enforceCap();
-  renderJobs();
-  toast(S.protect75 ? `75保护已开：单批最多 ${SEND_CAP()} 个` : '75保护已关：可选超过 75', 3000);
-});
-
 // 招呼语模式：AI 定制 / 自定义
 $('greet-mode').addEventListener('click', (e) => {
   const pill = e.target.closest('[data-mode]');
@@ -1726,16 +1734,18 @@ $('global-greet').addEventListener('input', (e) => { S.globalGreet = e.target.va
  * 生成中卡片显示沙漏，每生成完一条（GREETING_ITEM 广播）就填进对应卡片。
  */
 async function runGreeting() {
+  const batch = batchIds();   // 本批：按显示顺序取前 75（单批上限在此生效，静默）
+  const batchSet = new Set(batch);
   S.busy = true;
   S.greeted = false;
   S.greetDone = 0;
-  S.greetTotal = S.selected.size;
+  S.greetTotal = batch.length;
   $('btn-action').disabled = true;
   $('btn-action').textContent = `生成中 0/${S.greetTotal}…`;
 
-  // 把选中岗位的招呼语框展开，置为「生成中」沙漏态
+  // 把本批岗位的招呼语框展开，置为「生成中」沙漏态
   for (const el of document.querySelectorAll('#job-list .jcard')) {
-    if (!S.selected.has(el.dataset.jobid)) continue;
+    if (!batchSet.has(el.dataset.jobid)) continue;
     const ta = el.querySelector('.jgreet');
     const toggle = el.querySelector('.jgreet-toggle');
     ta.hidden = false;
@@ -1747,7 +1757,7 @@ async function runGreeting() {
 
   try {
     await ask(MSG.START_GREETING, {
-      jobIds: [...S.selected],
+      jobIds: batch,
       mode: 'ai',
       globalGreet: S.globalGreet || '',
       jobGreet: S.jobGreet || {},
@@ -1916,13 +1926,14 @@ async function runSend() {
   S.sending = true;
   S.sendPaused = false;
   S.sentJobIds = new Set();          // 本轮已处理过的岗位（跨暂停/继续累计）
-  S.sendTotal = S.selected.size;     // 这批总数，底部计数用
+  S.sendBatch = batchIds();          // 本批：按显示顺序取前 75（单批上限）
+  S.sendTotal = S.sendBatch.length;  // 这批总数，底部计数用
   if (S.screen !== 'result') showScreen('result');
   $('send-banner').hidden = false;
   $('sendbar-fill').style.width = '0%';
   $('sendbar-phase').textContent = '正在启动投递...';
   enterSendingBar();
-  await fireSend([...S.selected]);
+  await fireSend(S.sendBatch);
 }
 
 /** 向后台发投递指令（首投 / 继续都走这里）*/
@@ -1964,7 +1975,7 @@ async function pauseSending() {
 
 /** 点「继续发送」：把还没投的接着投 */
 async function resumeSending() {
-  const remaining = [...S.selected].filter((id) => !S.sentJobIds.has(id));
+  const remaining = (S.sendBatch || batchIds()).filter((id) => !S.sentJobIds.has(id));
   if (!remaining.length) {          // 没剩的了，直接当完成
     S.sending = false;
     finishBatch();
@@ -2062,21 +2073,8 @@ $('btn-service').addEventListener('click', openService);
 $('service-close').addEventListener('click', closeService);
 $('service-mask').addEventListener('click', closeService);
 
-// 设置抽屉：搜索时长拉杆
-function openSettings() {
-  $('dur-range').value = S.searchMinutes;
-  $('dur-val').textContent = S.searchMinutes;
-  $('settings-mask').hidden = false; $('settings-drawer').hidden = false;
-}
-function closeSettings() { $('settings-mask').hidden = true; $('settings-drawer').hidden = true; }
-$('btn-settings').addEventListener('click', openSettings);
-$('settings-close').addEventListener('click', closeSettings);
-$('settings-mask').addEventListener('click', closeSettings);
-$('dur-range').addEventListener('input', (e) => {
-  S.searchMinutes = Math.min(30, Math.max(3, parseInt(e.target.value, 10) || 5));
-  $('dur-val').textContent = S.searchMinutes;
-  try { chrome.storage.local.set({ 'jt:searchMinutes': S.searchMinutes }); } catch (err) {}
-});
+// 搜索时长不再让用户调：召回已封顶(单批上限×2≈150)、收够就停，
+// S.searchMinutes 只作为一个安全时间上限兜底（见 constants.DEFAULT_SEARCH_MINUTES）。
 
 chrome.runtime.onMessage.addListener((msg) => {
   // 单岗位招呼语生成完成：就地填进对应卡片（不跳屏）
@@ -2147,7 +2145,7 @@ chrome.runtime.onMessage.addListener((msg) => {
   // HR 活跃度和工作性质之前是预设好的，现在交还给用户自己点：
   // 预设值会让人以为「我什么都没选」，实际上池子已经被悄悄收窄了。
 
-  const st = await chrome.storage.local.get([STORE.UI.FILTER_STATE, 'jt:searchOverrides', 'jt:brandOverrides', 'jt:searchMinutes']);
+  const st = await chrome.storage.local.get([STORE.UI.FILTER_STATE, 'jt:searchOverrides', 'jt:brandOverrides']);
   const saved = st[STORE.UI.FILTER_STATE];
   if (saved) {
     S.searchMode = saved.searchMode || 'position';
@@ -2158,7 +2156,7 @@ chrome.runtime.onMessage.addListener((msg) => {
   }
   S.searchOverrides = st['jt:searchOverrides'] || {};
   S.brandOverrides = st['jt:brandOverrides'] || {};
-  S.searchMinutes = Math.min(30, Math.max(3, st['jt:searchMinutes'] || 5));
+  // 搜索时长固定，不再从存储读用户值
 
   renderUploads();
   renderMode();
