@@ -20,11 +20,13 @@
     "scripting",
     "sidePanel",
     "alarms",
-    "tabs"
+    "tabs",
+    "cookies"
   ],
   "host_permissions": [
     "*://*.zhipin.com/*",
-    "https://dashscope.aliyuncs.com/*"
+    "https://dashscope.aliyuncs.com/*",
+    "https://api.santaya.chat/*"
   ],
   "content_scripts": [
     {

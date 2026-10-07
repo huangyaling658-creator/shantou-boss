@@ -7,26 +7,44 @@
 //   send_click          点了一键投递        → 投递按钮点击渗透
 // 渗透口径：某天点过该按钮的去重用户数 ÷ 当天日活（去重 uid）。
 //
-// 隐私：uid 是首次运行时生成的随机匿名 ID，不含账号、姓名等任何个人资料。
-// 储存：事件先落 chrome.storage.local（方案 A·本地后台）；
-//       CONFIG.ANALYTICS_ENDPOINT 配上云端地址后自动批量上报（方案 B），
-//       上报失败静默、本地数据不丢，埋点任何异常都不影响主流程。
+// 隐私：uid 是首次运行时生成的 8 位随机匿名 ID（0-9 + a-z 小写，约 2.8 万亿组合），
+//      不含账号、姓名等任何个人资料；卸载重装会换新 ID，视为新用户。
+// 储存与传送（2026-10-07 与统一后台定稿的方案；2026-10-08 加「空闲即报」）：
+//   ① 储存：事件先落 chrome.storage.local（封顶 5000 先进先出，本地不丢）；
+//   ② 传送：两个条件任一满足即触发批量上报——
+//      a) 攒够 ANALYTICS_FLUSH_BATCH 条；
+//      b) 最后一次行为后 ANALYTICS_IDLE_FLUSH_MS 毫秒内无新行为（每来一条重置计时）。
+//      service worker 每 6 小时 + 每次启动也会自动调 flush() 补发兜底
+//     （MV3 下 setTimeout 可能随 worker 休眠失效，兜底链路保证数据终将送达、不丢）；
+//      上报地址 CONFIG.ANALYTICS_ENDPOINT（统一平台唯写接口），未配置时空转（只存本地）；
+//      上报成功才推进游标，失败静默下次再传，埋点任何异常都不影响主流程。
+//   ③ 内容：只发行为流水（按钮名+时间+uid），不发简历、手机号等任何隐私数据，不加密（HTTPS 已加密传输）。
+// 可见性：使用统计不给用户看（面板区块已下线），公司查看走密码保护的数据后台。
 // ════════════════════════════════════════════════════════════════
 
 const Tracker = {
   _uid: null,
   _flushing: false,
+  _idleTimer: null,
 
-  /** 取（或首次生成）匿名安装 ID */
+  /** 生成 8 位匿名安装 ID：0-9 + a-z（小写），crypto 加密级随机 */
+  _newInstallId() {
+    const chars = '0123456789abcdefghijklmnopqrstuvwxyz';
+    const buf = new Uint32Array(8);
+    crypto.getRandomValues(buf);
+    let id = '';
+    for (let i = 0; i < 8; i++) id += chars[buf[i] % 36];
+    return id;
+  },
+
+  /** 取（或首次生成）匿名安装 ID。旧版本已生成的 UUID 式 ID 保留沿用，不强制换新 */
   async uid() {
     if (this._uid) return this._uid;
     const key = STORE.UI.INSTALL_ID;
     const st = await chrome.storage.local.get(key);
     let id = st[key];
     if (!id) {
-      id = (typeof crypto !== 'undefined' && crypto.randomUUID)
-        ? crypto.randomUUID()
-        : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      id = this._newInstallId();
       await chrome.storage.local.set({ [key]: id });
     }
     this._uid = id;
@@ -53,7 +71,15 @@ const Tracker = {
       const cap = CONFIG.ANALYTICS_MAX_EVENTS || 5000;
       while (arr.length > cap) arr.shift();
       await chrome.storage.local.set({ [key]: arr });
-      this.flush();   // 配了云端端点才真的上报，否则立即返回
+      // 上报触发（2026-10-08 用户定稿，两个条件任一满足）：
+      //   a) 攒批：每积累约 N 条触发一次 flush；
+      //   b) 空闲：每次行为后重置一个 N 毫秒计时器，期间再无新行为就 flush。
+      // 都不满足时等 6 小时闹钟/下次启动补发；未配端点时 flush 内部直接返回
+      const batch = CONFIG.ANALYTICS_FLUSH_BATCH || 10;
+      if (arr.length % batch === 0) this.flush();
+      const idleMs = CONFIG.ANALYTICS_IDLE_FLUSH_MS || 10000;
+      if (this._idleTimer) clearTimeout(this._idleTimer);
+      this._idleTimer = setTimeout(() => { this._idleTimer = null; this.flush(); }, idleMs);
     } catch (e) { /* 静默 */ }
   },
 

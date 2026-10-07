@@ -78,6 +78,17 @@
     // 海投 v2：换词/换城时清空滚动读卡状态
     [MSG.SCROLL_RESET]: async () => { Collector.resetScroll(); return { ok: true }; },
 
+    // 海投 v2 布置：在结果页筛选栏按 code 点一个筛选项（找不到由 SW 退回 URL 补）
+    [MSG.APPLY_FILTER]: async (payload = {}) => {
+      return Collector.applyFilterByCode(payload.key || '', payload.code || '');
+    },
+
+    // 海投 v2 布置地点：点页面城市选择器选城市 / 读当前城市 chip（jobs 列表页不吃 URL city 参数）
+    [MSG.APPLY_CITY]: async (payload = {}) => {
+      return Collector.applyCity(payload.code || '', payload.name || '');
+    },
+    [MSG.READ_CITY_CHIP]: async () => Collector.readCityChip(),
+
     // 海投 v2 单步：读新增卡 → 滚一屏。节拍由 SW 全局闸掐；SW 负责先激活标签。
     [MSG.COLLECT_ONE_SCROLL]: async () => {
       return await Collector.collectOneScroll();

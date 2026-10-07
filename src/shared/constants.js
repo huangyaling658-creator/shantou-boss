@@ -14,6 +14,9 @@ const MSG = {
   GET_STATE: 'GET_STATE',
   SAVE_CONFIG: 'SAVE_CONFIG',
   START_RECALL: 'START_RECALL',
+  RESUME_RECALL: 'RESUME_RECALL',             // 恢复搜索：从上次手动停止的断点续跑（需求 #11）
+  GET_SEARCH_CHECKPOINT: 'GET_SEARCH_CHECKPOINT',   // 查搜索断点（面板决定要不要显示「恢复搜索」）
+  CLEAR_SEARCH_CHECKPOINT: 'CLEAR_SEARCH_CHECKPOINT', // 重置时清掉断点
   CLASSIFY_POSITIONS: 'CLASSIFY_POSITIONS',   // 岗位词→BOSS职位类目 语义归类（LLM兜底）
   START_GREETING: 'START_GREETING',     // 为已选岗位批量生成招呼语（立即返回，进度走广播）
   GET_TASK: 'GET_TASK',                 // 面板重连时拉一次当前任务状态
@@ -47,6 +50,9 @@ const MSG = {
   DRIVE_HOME_SEARCH: 'DRIVE_HOME_SEARCH', // 海投 v2：驱动 BOSS 首页搜索框搜词（真人链路第 2 步）
   SCROLL_RESET: 'SCROLL_RESET',         // 海投 v2：清空滚动读卡状态（换词/换城时）
   COLLECT_ONE_SCROLL: 'COLLECT_ONE_SCROLL', // 海投 v2 单步：读新增卡→滚一屏，节拍由 SW 全局闸掐
+  APPLY_FILTER: 'APPLY_FILTER',         // 海投 v2 布置：在结果页筛选栏上按 code 点一个筛选项（真人链路第 3 步的延伸）
+  APPLY_CITY: 'APPLY_CITY',             // 海投 v2 布置地点：点页面城市选择器选城市（jobs 列表页不吃 URL 的 city 参数）
+  READ_CITY_CHIP: 'READ_CITY_CHIP',     // 读页面当前城市 chip 文本（校验地点布置是否生效）
   READ_BRAND_DOM: 'READ_BRAND_DOM',  // 从搜索结果页 DOM 里读公司 brandId（不走签名接口，可后台并行）
   CHECK_RISK: 'CHECK_RISK',         // 读页面上的验证码/风控迹象
   GREETING_SWITCH: 'GREETING_SWITCH',   // 读写 BOSS 自带招呼语开关
@@ -84,6 +90,7 @@ const STORE = {
     BRAND_CACHE: 'sw:brandCache',
     RESUME_IMAGES: 'sw:resumeImages',   // [{dataUrl, name, ocrDone}]，最多 10 张
     FILTER_DICT: 'sw:filterDict',       // 从 BOSS 页面抓来的筛选项字典 + 抓取时间
+    SEARCH_CHECKPOINT: 'sw:searchCheckpoint',   // 搜索断点（需求 #11：手动停止后「恢复搜索」续跑用）
   },
   UI: {
     PANEL_TAB: 'ui:panelTab',
@@ -162,16 +169,21 @@ const CONFIG = {
   PAGE_INTERVAL_MAX_MS: 6000,           // 翻页最大间隔 6 秒（4~6 秒随机，精确到 0.01 秒）
   TURN_GATE_MIN_MS: 4000,               // 全局行为闸（精投）：每 4~6 秒随机放行一个行为（用户 2026-10-06 定）
   TURN_GATE_MAX_MS: 6000,
-  HAITOU_TURN_GATE_MIN_MS: 4000,        // 全局行为闸（海投）：每 4~6 秒随机放行一个滚动行为（用户 2026-10-06 定，与精投同区间）
-  HAITOU_TURN_GATE_MAX_MS: 6000,
+  HAITOU_TURN_GATE_MIN_MS: 3000,        // 全局行为闸（海投）：每 3~4 秒随机放行一个滚动行为（用户 2026-10-07 由 4~5 改 3~4；精投仍 4~6 不变）
+  HAITOU_TURN_GATE_MAX_MS: 4000,
   ACTIONS_PER_MINUTE: 12,               // 行为预算：每分钟 12 个行为（均值 5 秒一个；5 分钟 = 60 个，用户 2026-10-06 定）
   HAITOU_MAX_TABS: 5,                   // 海投 v2：一城一标签，最多 5 城并行（用户定的上限）
+  HAITOU_STOP_MINUTES: 3,               // 海投中止条件①：3 分钟硬闸（用户 2026-10-07 定）
+  HAITOU_MAX_RESULTS: 150,              // 海投中止条件②：收满 150 个结果即停（用户 2026-10-07 定）
+  HAITOU_MAX_ACTIONS: 60,               // 海投中止条件③：满 60 个行为即停（用户 2026-10-07 定）；三者任一先到即停，冷却时间不受影响
   // ── 拟人化的分页开关间隔（精投/海投共用）──
   // 原则：这类行为要模仿人类——人不会同一秒连开 5 个分页，也不会用完瞬间关掉。
   TAB_OPEN_MIN_MS: 1000,                // 开页闸：每开一个分页全局隔 1~2 秒随机，轮流开不突刺
   TAB_OPEN_MAX_MS: 2000,
   TAB_CLOSE_MIN_MS: 1000,               // 关页延迟：用完隔 1~3 秒随机再关，且异步不阻塞下一个
   TAB_CLOSE_MAX_MS: 3000,
+  HAITOU_LAYOUT_MIN_MS: 1000,           // 海投布置闸：布置阶段每个动作 1~2 秒随机一个（用户 2026-10-07 由 2~3 改 1~2）；
+  HAITOU_LAYOUT_MAX_MS: 2000,           // 覆盖开分页/回主页/驱动搜索框/选城导航/逐个筛选项点击；精投开页仍走 TAB_OPEN_* 不变
   ROUND_INTERVAL_MS: 6000,        // 换一组搜索条件之间的停顿
   MAX_PARALLEL_TABS: 4,           // 并行搜索的标签页上限（对齐即投：一城一页并行）
   CANDIDATE_CAP: 300,             // 廉价过滤后送去拉 JD 的上限
@@ -210,7 +222,9 @@ const CONFIG = {
   // ⚠️ 模型名会随厂商迭代变更（DeepSeek 就在 2026-07 停用过 deepseek-chat，
   // 传旧名直接 400）。这三个名字是可调项，调用失败时会把厂商返回的原始
   // 错误信息透出到界面上，好让「模型名过期」这种问题一眼看出来。
-  LLM_ENDPOINT: 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions',
+  // 2026-10-08 起改走统一后台中转：插件不持 key，请求发给 api.santaya.chat，
+  // 由服务器贴上管理员在后台填入的 DashScope 密钥再转发。模型/提示词/参数全不变。
+  LLM_ENDPOINT: 'https://api.santaya.chat/v1/ai/shantou',
   // 2026-09-16 实测结果（账号处于「仅使用免费额度」模式）：
   //   qwen-vl-plus  ✅ 可用，OCR 质量够，项目名和数字都能完整保留
   //   qwen-plus     ✅ 可用
@@ -224,6 +238,8 @@ const CONFIG = {
   LLM_CONCURRENCY: 3,
   GREETING_CONCURRENCY: 5,        // 招呼语并发工作池大小（每个 worker 抓JD+生成）
   LLM_TIMEOUT_MS: 30000,
+  GREETING_STALL_MS: 30000,       // 生成看门狗（用户 2026-10-07 定）：30 秒没有新招呼语产出就停止整批，已生成的保留
+  JD_FETCH_TIMEOUT_MS: 20000,     // 抓岗位详情 HTML 的超时。之前这段无超时，被风控挂起时 5 个 worker 全卡死、面板永远 0/N
   OCR_TIMEOUT_MS: 60000,
 
   GREETING_MIN_LEN: 350,
@@ -234,7 +250,10 @@ const CONFIG = {
   RESUME_IMAGES_PER_SEND: 2,
 
   // 埋点（只保三个数据：日活、海投/精投点击渗透、投递点击渗透）
-  ANALYTICS_ENDPOINT: '',       // 云端上报地址。空 = 仅本地储存（方案 A）；配上即自动批量上报（方案 B）
+  ANALYTICS_ENDPOINT: 'https://api.santaya.chat/v1/ingest/shantou',  // 统一平台接收接口（唯写）。空 = 仅本地储存；配上即自动批量上报
+  ANALYTICS_FLUSH_BATCH: 10,    // 本地攒够 N 条未上报事件就触发一次批量上报
+  ANALYTICS_IDLE_FLUSH_MS: 10000, // 或：最后一次行为后 N 毫秒无新行为也触发上报（2026-10-08 用户定）
+  // 以上两个条件任一满足即上报；都不满足时仍有 6 小时闹钟/下次启动补发兜底，数据不丢
   ANALYTICS_MAX_EVENTS: 5000,   // 本地事件封顶，先进先出
   FEEDBACK_MAX: 500,            // 客服反馈本地封顶，先进先出
 };

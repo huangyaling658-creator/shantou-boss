@@ -1,8 +1,13 @@
 // ════════════════════════════════════════════════════════════════
 // 闪投 · 模型调用层（通义千问 DashScope，OpenAI 兼容模式）
 // ────────────────────────────────────────────────────────────────
-// 一个厂商同时提供视觉和文本模型，所以只接一个 key：
-//   qwen-vl-max  简历截图 OCR（只在换简历时跑一次）
+// 2026-10-08 起：插件不再持有 key（防偷 key 的定稿方案——「key 不出门，
+// 请求送来服务器」）。请求发给统一后台 api.santaya.chat/v1/ai/shantou，
+// 由服务器贴 key 转发 DashScope，响应原样传回。模型/提示词/参数全不变，
+// 效果与直连一致；secrets.js 里的 QWEN_KEY 从此空置即可。
+//
+// 一个厂商同时提供视觉和文本模型，模型分工不变：
+//   qwen-vl-plus 简历截图 OCR（只在换简历时跑一次）
 //   qwen-plus    四维打分（量大，选便宜快的）
 //   qwen-max     招呼语（量小但直接决定回复率，选好的）
 //
@@ -10,14 +15,6 @@
 // ════════════════════════════════════════════════════════════════
 
 const LLM = {
-
-  key() {
-    const k = (typeof SECRETS !== 'undefined' && SECRETS.QWEN_KEY) || '';
-    if (!k || k.startsWith('这里粘贴')) {
-      throw new Error('未配置模型密钥：请填写 src/shared/secrets.js 里的 QWEN_KEY');
-    }
-    return k;
-  },
 
   /**
    * 通用对话调用。
@@ -28,13 +25,12 @@ const LLM = {
   async chat({ model, messages, temperature = 0.7, jsonMode = false, timeoutMs }) {
     const body = { model, messages, temperature };
     if (jsonMode) body.response_format = { type: 'json_object' };
+    // 中转要求带安装 ID（8 位匿名 ID），服务器据此验身份、记调用次数
+    body.uid = await Tracker.uid();
 
     const doFetch = fetch(CONFIG.LLM_ENDPOINT, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${this.key()}`,
-      },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
 

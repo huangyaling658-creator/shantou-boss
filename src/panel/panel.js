@@ -33,6 +33,23 @@ function toast(msg, ms = 3200) {
   toastTimer = setTimeout(() => { el.hidden = true; }, ms);
 }
 
+// 通用提示弹窗（周五上线需求 #10 用：选第 4 家公司时拦截+弹窗）
+function showAlert(msg) {
+  $('alert-msg').textContent = msg;
+  $('alert-mask').hidden = false;
+  $('alert-box').hidden = false;
+}
+function hideAlert() { $('alert-mask').hidden = true; $('alert-box').hidden = true; }
+
+// 精投目标公司最多 3 家（周五上线需求 #10，P0：利于稳定/提速）。
+// 返回 true = 已满，已弹窗提示，调用方直接 return 不加。
+const COMPANY_MAX = 3;
+function companyFull() {
+  if (S.companies.length < COMPANY_MAX) return false;
+  showAlert(`目标公司最多选 ${COMPANY_MAX} 家。\n先取消一家，再选新的。`);
+  return true;
+}
+
 // ════════════════════════════════════════════════════════════
 // 状态
 // ════════════════════════════════════════════════════════════
@@ -73,22 +90,49 @@ const S = {
   searchMinutes: (typeof CONFIG !== 'undefined' && CONFIG.DEFAULT_SEARCH_MINUTES) || 5,  // 固定安全时间上限，不再给用户调
 };
 
+// 热门城市次序对齐 BOSS「请选择城市」弹窗的热门城市页（2026-10-07 用户截图定）：
+// 全国 北京 上海 广州 深圳 / 杭州 天津 西安 苏州 武汉 / 厦门 长沙 成都 郑州 重庆
 const HOT_CITIES = [
   { code: '100010000', label: '全国' }, { code: '101010100', label: '北京' },
   { code: '101020100', label: '上海' }, { code: '101280100', label: '广州' },
   { code: '101280600', label: '深圳' }, { code: '101210100', label: '杭州' },
-  { code: '101270100', label: '成都' }, { code: '101200100', label: '武汉' },
-  { code: '101190100', label: '南京' }, { code: '101190400', label: '苏州' },
+  { code: '101030100', label: '天津' }, { code: '101110100', label: '西安' },
+  { code: '101190400', label: '苏州' }, { code: '101200100', label: '武汉' },
+  { code: '101230200', label: '厦门' }, { code: '101250100', label: '长沙' },
+  { code: '101270100', label: '成都' }, { code: '101180100', label: '郑州' },
+  { code: '101040100', label: '重庆' },
 ];
+// BOSS 热门页以外的城市收进「展开更多」（保留原可选范围）
 const MORE_CITIES = [
-  { code: '101220100', label: '合肥' }, { code: '101250100', label: '长沙' },
-  { code: '101040100', label: '重庆' }, { code: '101110100', label: '西安' },
-  { code: '101030100', label: '天津' }, { code: '101120100', label: '济南' },
-  { code: '101120200', label: '青岛' }, { code: '101070100', label: '沈阳' },
-  { code: '101230200', label: '厦门' }, { code: '101280700', label: '珠海' },
+  { code: '101190100', label: '南京' }, { code: '101220100', label: '合肥' },
+  { code: '101120100', label: '济南' }, { code: '101120200', label: '青岛' },
+  { code: '101070100', label: '沈阳' }, { code: '101280700', label: '珠海' },
   { code: '101281600', label: '东莞' }, { code: '101210400', label: '宁波' },
-  { code: '101190200', label: '无锡' }, { code: '101180100', label: '郑州' },
+  { code: '101190200', label: '无锡' },
 ];
+
+// ── 各城市的「工作区域」行政区选项（2026-10-07 用户按 BOSS 筛选栏逐城截图提供）──
+// 区域是可多选的（BOSS 筛选栏本身支持多选）。没列的城市（含全国）没有答案，
+// 工作区域只剩「不限」（用户原话：其他没有答案的就默认只有不限）。
+const CITY_DISTRICTS = {
+  '101010100': ['东城区', '西城区', '朝阳区', '石景山区', '丰台区', '门头沟区', '海淀区', '房山区', '顺义区', '通州区', '大兴区', '昌平区', '平谷区', '怀柔区', '延庆区', '密云区'], // 北京
+  '101020100': ['崇明区', '黄浦区', '虹口区', '杨浦区', '徐汇区', '长宁区', '静安区', '普陀区', '金山区', '松江区', '青浦区', '闵行区', '宝山区', '嘉定区', '浦东新区', '奉贤区'], // 上海
+  '101280100': ['荔湾区', '白云区', '天河区', '越秀区', '海珠区', '增城区', '从化区', '花都区', '南沙区', '黄埔区', '番禺区'], // 广州
+  '101280600': ['罗湖区', '坪山区', '光明区', '盐田区', '龙华区', '宝安区', '龙岗区', '福田区', '南山区'], // 深圳
+  '101210100': ['建德市', '临平区', '临安区', '钱塘区', '淳安县', '桐庐县', '上城区', '萧山区', '滨江区', '富阳区', '余杭区', '拱墅区', '西湖区'], // 杭州
+  '101030100': ['和平区', '河西区', '河东区', '河北区', '南开区', '红桥区', '西青区', '东丽区', '北辰区', '津南区', '宝坻区', '武清区', '宁河区', '滨海新区', '蓟州区', '静海区'], // 天津
+  '101110100': ['蓝田县', '周至县', '雁塔区', '未央区', '临潼区', '阎良区', '高陵区', '长安区', '鄠邑区', '莲湖区', '灞桥区', '碑林区', '新城区'], // 西安
+  '101190400': ['常熟市', '张家港市', '昆山市', '太仓市', '姑苏区', '吴江区', '虎丘区', '吴中区', '相城区', '苏州工业园区'], // 苏州
+  '101200100': ['江岸区', '江汉区', '洪山区', '武昌区', '青山区', '硚口区', '汉阳区', '黄陂区', '新洲区', '蔡甸区', '江夏区', '东西湖区', '汉南区'], // 武汉
+  '101230200': ['翔安区', '同安区', '集美区', '海沧区', '湖里区', '思明区'], // 厦门
+  '101250100': ['芙蓉区', '天心区', '雨花区', '岳麓区', '开福区', '宁乡市', '浏阳市', '望城区', '长沙县'], // 长沙
+  '101270100': ['成华区', '武侯区', '金牛区', '青羊区', '锦江区', '邛崃市', '彭州市', '都江堰市', '郫都区', '双流区', '温江区', '新都区', '青白江区', '龙泉驿区', '金堂县', '简阳市', '崇州市', '新津区', '蒲江县', '大邑县'], // 成都
+  '101180100': ['荥阳市', '新密市', '巩义市', '中牟县', '新郑市', '登封市', '中原区', '二七区', '惠济区', '上街区', '管城回族区', '金水区'], // 郑州
+  '101040100': ['渝中区', '垫江县', '涪陵区', '丰都县', '万州区', '城口县', '大足区', '綦江区', '巫溪县', '北碚区', '巫山县', '南岸区', '奉节县', '九龙坡区', '云阳县', '沙坪坝区', '忠县', '大渡口区', '南川区', '永川区', '合川区', '江津区', '彭水苗族土家族自治县', '长寿区', '黔江区', '酉阳土家族苗族自治县', '秀山土家族苗族自治县', '巴南区', '石柱土家族自治县', '璧山区', '铜梁区', '两江新区', '武隆区', '梁平区', '开州区', '荣昌区', '潼南区'], // 重庆
+};
+
+// 全国：单选，与具体城市互斥（2026-10-07 用户定）
+const ALL_COUNTRY = { code: '100010000', label: '全国' };
 
 // ── 各筛选项的选项表 ──
 // 顺序、外露选项、默认值全部对齐同类产品的成熟形态，
@@ -104,20 +148,12 @@ const OPT = {
     { label: '交通/物流' }, { label: '能源/化工/环保' }, { label: '金融' },
     { label: '政府/非营利' },
   ],
-  // 工作区域是所选城市下面的行政区，只能运行时从页面上抓，内置只留「不限」
+  // 工作区域 = 所选城市下面的行政区，内置表在 CITY_DISTRICTS（按所选城市取并集），
+  // 这里只留「不限」占位；选中存区名，真实 code 运行时用抓取字典按名字对齐。
   businessDistrict: [{ code: '', label: '不限' }],
   jobType: [
     { code: '', label: '不限' }, { code: '1901', label: '全职' },
     { code: '1902', label: '兼职' }, { code: '1903', label: '实习' },
-  ],
-  hrActive: [
-    { code: '', label: '不限' }, { code: '0', label: '只投在线' },
-    { code: '1', label: '3日内活跃' }, { code: '2', label: '本周内活跃' },
-    { code: '3', label: '本月内活跃' },
-  ],
-  welfare: [
-    { code: '', label: '不限' }, { code: 'double', label: '周末双休' },
-    { code: 'insurance', label: '五险一金' },
   ],
   salary: [
     { code: '', label: '不限' }, { code: '402', label: '3K以下' }, { code: '403', label: '3-5K' },
@@ -153,14 +189,12 @@ const OPT = {
 };
 
 const FILTER_SECTIONS = [
-  { key: 'industry', label: '公司行业', searchable: true },
   { key: 'businessDistrict', label: '工作区域' },
-  { key: 'jobType', label: '工作性质' },
-  { key: 'hrActive', label: 'HR 活跃度' },
-  { key: 'welfare', label: '福利待遇' },
+  { key: 'jobType', label: '求职类型' },
   { key: 'salary', label: '薪资待遇' },
   { key: 'experience', label: '工作经验' },
   { key: 'degree', label: '学历要求' },
+  { key: 'industry', label: '公司行业', searchable: true },
   { key: 'scale', label: '公司规模' },
   { key: 'stage', label: '融资阶段' },
 ];
@@ -356,7 +390,10 @@ function renderCompanies(q = '') {
       row.appendChild(makePill(c.n, S.companies.some((x) => x.name === c.n), () => {
         const i = S.companies.findIndex((x) => x.name === c.n);
         if (i >= 0) S.companies.splice(i, 1);
-        else S.companies.push({ name: c.n, aliases: c.a, search: c.s || c.n });
+        else {
+          if (companyFull()) return;   // 需求 #10：最多 3 家，第 4 家拦截+弹窗
+          S.companies.push({ name: c.n, aliases: c.a, search: c.s || c.n });
+        }
         renderCompanies($('company-search').value);
         renderCompanyChips();
         saveConfig();
@@ -378,6 +415,7 @@ function renderCompanies(q = '') {
       addRow.style.marginTop = '14px';
       addRow.appendChild(makePill(`+ 添加公司「${raw}」`, false, () => {
         if (!S.companies.some((x) => x.name === raw)) {
+          if (companyFull()) return;   // 需求 #10：最多 3 家，第 4 家拦截+弹窗
           S.companies.push({ name: raw, aliases: [raw], search: raw });
         }
         $('company-search').value = '';
@@ -408,11 +446,33 @@ $('company-search').addEventListener('input', (e) => renderCompanies(e.target.va
 
 function toggleCity(c) {
   const i = S.cities.findIndex((x) => x.code === c.code);
-  if (i >= 0) S.cities.splice(i, 1);
-  else S.cities.push(c);
+  if (c.code === ALL_COUNTRY.code) {
+    // 全国是单选：点了就只留全国（2026-10-07 用户定）
+    S.cities = i >= 0 ? [] : [{ ...ALL_COUNTRY }];
+  } else {
+    if (i >= 0) S.cities.splice(i, 1);
+    else {
+      S.cities = S.cities.filter((x) => x.code !== ALL_COUNTRY.code);   // 选具体城市就挤掉全国（互斥）
+      S.cities.push(c);
+    }
+  }
+  // 一个城市都不选时（取消唯一城市后）自动点回全国（2026-10-07 用户定）
+  if (!S.cities.length) S.cities = [{ ...ALL_COUNTRY }];
+  // 工作区域实时跟着目标城市换：只展最后选择的城市的区域，
+  // 清掉不属于当前展示城市的已选区名，再重画筛选区（2026-10-07 用户定）
+  const dn = currentDistrictNames();
+  S.filters.businessDistrict = (S.filters.businessDistrict || []).filter((v) => dn.includes(v));
   renderCityQuick();
   renderCityChips();
+  renderFilters();   // 工作区域实时跟随目标城市
   saveConfig();
+}
+
+// 当前工作区域应展示的区名（2026-10-07 用户定）：两个或以上城市时只展**最后选择**的城市的区域；
+// 全国/没答案的城市 → 空数组（工作区域只剩「不限」）。
+function currentDistrictNames() {
+  const last = S.cities[S.cities.length - 1];
+  return last ? (CITY_DISTRICTS[last.code] || []) : [];
 }
 
 function renderCityQuick(searchHits) {
@@ -728,24 +788,36 @@ function renderFilters() {
     // 其余项如果拿不到真实 code，绝不能也用空串——那样会和「不限」的空串
     // 撞上，导致每一项都被判成选中、整排变橙。给它们一个不会与任何真实值
     // 相等的占位 code，既不高亮，点了也不会误改筛选状态。
-    const options = (OPT[f.key] || []).map((o, i) => {
-      let code = o.code !== undefined ? o.code : byLabel.get(o.label);
-      if (code === undefined || code === '') code = i === 0 ? '' : `__unresolved_${f.key}_${i}`;
-      return { label: o.label, code, unresolved: String(code).startsWith('__unresolved') };
-    });
-    // 只有工作区域需要用页面上抓到的动态选项补全（各城市的行政区不一样）。
-    // 其余维度以内置表为准，不再合并抓取到的项——否则会冒出
-    // 「应届生」和「应届生(校招)」这种重复选项。
+    let options;
     if (f.key === 'businessDistrict') {
-      for (const o of scraped) {
-        if (!options.some((x) => x.label === o.label)) options.push({ label: o.label, code: o.code });
+      // 工作区域跟着所选城市走（2026-10-07 用户定）：只展**最后选择**的城市的行政区，
+      // 全国/没答案的城市只剩「不限」。
+      // 选中状态存「区名」（同行业存名字的做法），真实 code 运行时用抓取字典按名字
+      // 对齐；对不上也能由 collector 按选项文字点出来，所以区域永远不算 deadKey。
+      const names = currentDistrictNames();
+      options = [{ label: '不限', code: '', unresolved: false }];
+      for (const n of names) {
+        options.push({ label: n, code: n, unresolved: !byLabel.has(n) });
       }
+      if (!names.length) {
+        // 所选城市都没有内置答案 → 用页面上抓到的选项兜底（保留旧行为）
+        for (const o of scraped) {
+          if (!options.some((x) => x.label === o.label)) options.push({ label: o.label, code: o.code });
+        }
+      }
+    } else {
+      options = (OPT[f.key] || []).map((o, i) => {
+        let code = o.code !== undefined ? o.code : byLabel.get(o.label);
+        if (code === undefined || code === '') code = i === 0 ? '' : `__unresolved_${f.key}_${i}`;
+        return { label: o.label, code, unresolved: String(code).startsWith('__unresolved') };
+      });
     }
     if (!options.length) continue;
 
     const sel = new Set(S.filters[f.key] || []);   // 多选，存成数组
     // 除「不限」外一个真实 code 都没有，说明这一项点了也筛不动
-    if (options.length > 1 && !options.some((o) => o.code && !o.unresolved)) deadKeys.push(f.label);
+    // （工作区域除外：没 code 也能按区名文字点，不算死项）
+    if (f.key !== 'businessDistrict' && options.length > 1 && !options.some((o) => o.code && !o.unresolved)) deadKeys.push(f.label);
 
     const sec = document.createElement('section');
     sec.className = 'sec';
@@ -783,15 +855,6 @@ function renderFilters() {
       }, { multi: true }));
     }
     sec.appendChild(row);
-
-    // 双休没有结构化字段，只能看岗位标题写没写，会误杀大量实际双休的岗位。
-    // 这个代价必须在用户选中的当下说清楚。
-    if (f.key === 'welfare' && (S.filters.welfare || []).includes('double')) {
-      const w = document.createElement('div');
-      w.className = 'warn';
-      w.innerHTML = '⚠ <b>可投岗位会大幅减少。</b>双休依据岗位标题是否写明判断，大量实际双休但没写的岗位会被过滤掉。';
-      sec.appendChild(w);
-    }
     area.appendChild(sec);
   }
 
@@ -843,12 +906,14 @@ function renderMode() {
   // 留着反而让人误以为能精准锁公司，所以海投直接隐藏整个模块。
   const isCompany = S.searchMode === 'company';
   $('sec-company').hidden = !isCompany;
-  // 换位营造切换感：精投把「目标公司」提到最上面，海投只有城市/职位
+  // 换位营造切换感：精投把「目标公司」提到最上面；
+  // 海投把「期望职位」放在图片版简历正下方（用户 2026-10-07 定，position 在 city 前）。
+  // 注意：版块顺序由这里的 JS 动态排，panel.html 里的静态顺序不生效。
   const anchor = $('filter-area');
   const parent = anchor.parentNode;
   const order = isCompany
     ? ['sec-company', 'sec-position', 'sec-city']
-    : ['sec-city', 'sec-position', 'sec-company'];
+    : ['sec-position', 'sec-city', 'sec-company'];
   for (const id of order) parent.insertBefore($(id), anchor);
   updateAction();
 }
@@ -916,6 +981,7 @@ function renderEtaHint() {
 function updateAction() {
   const btn = $('btn-action');
   const reset = $('btn-reset');
+  refreshResumeSearchBtn();   // 恢复搜索按钮（需求 #11）：内部异步查断点，忙时直接藏
   if (S.busy || S.sending) return;   // 投递进行中/暂停中由 enterSendingBar 管按钮
 
   reset.hidden = false;
@@ -932,13 +998,16 @@ function updateAction() {
   }
 
   if (S.screen === 'result') {
-    // 自定义模式，或 AI 已经生成完 → 直接投递；否则先生成。
-    // n = 本批实际处理数（选中数按显示顺序封顶在单批上限）
+    // 判定（用户 2026-10-07 定）：所选岗位的招呼语格子全部有内容 →「一键投递」；
+    // 有一个空 →「生成打招呼语」（不显示数字），只生成空的。自定义模式保持直投（AI 不介入）。
     const n = Math.min(S.selected.size, SEND_CAP());
-    if (S.greetMode === 'custom' || S.greeted) {
+    if (S.greetMode === 'custom') {
       btn.textContent = n ? `一键投递（${n}）` : '一键投递';
     } else {
-      btn.textContent = n ? `生成打招呼语（${n}）` : '生成打招呼语';
+      const empties = emptyGreetIds();
+      btn.textContent = empties.length
+        ? '生成打招呼语'   // 不显示数字（用户 2026-10-07 定）
+        : (n ? `一键投递（${n}）` : '一键投递');
     }
     btn.disabled = n === 0;
     return;
@@ -989,12 +1058,63 @@ function stopSearch() {
   toast('已停止');
 }
 
+// ── 恢复搜索（需求 #11）──
+// 手动停止后 SW 会把断点（条件快照+已完成单元）落盘；有断点且不在忙就显示「恢复搜索」。
+// 点续跑：跳过已完成单元，预算重新给一轮（2026-10-07 用户拍的口径 1）。
+let resumeBtnReqSeq = 0;
+async function refreshResumeSearchBtn() {
+  const btn = $('btn-resume-search');
+  if (!btn) return;
+  if (S.busy || S.sending) { btn.hidden = true; return; }
+  const seq = ++resumeBtnReqSeq;
+  let cp = null;
+  try { const r = await ask(MSG.GET_SEARCH_CHECKPOINT); cp = r.checkpoint || null; }
+  catch (e) { /* SW 没醒就当没断点 */ }
+  if (seq !== resumeBtnReqSeq) return;   // 期间又刷了一次，旧响应别覆盖新状态
+  btn.hidden = !cp;
+  if (cp) btn.textContent = `恢复搜索（接着上次停止处 · 已完成${cp.doneCount}个单元）`;
+}
+
+$('btn-resume-search').addEventListener('click', async () => {
+  if (S.busy || S.sending) return;
+  // 界面起步与 runSearch 同款（进度条/计时/停止钮），只是发令走 RESUME_RECALL
+  S.busy = true;
+  S.searchStopped = false;
+  showScreen('result');
+  startSearchTimer();
+  $('search-progress').hidden = false;
+  $('funnel').hidden = true; $('funnel').innerHTML = '';
+  $('company-status').innerHTML = '';
+  $('login-warn').hidden = true;
+  S.searchDetailOpen = true; updateSearchDetailSec();
+  $('job-list').innerHTML = '';
+  $('result-body').hidden = true;
+  $('search-empty').hidden = true;
+  $('btn-resume-search').hidden = true;
+  $('btn-action').disabled = true;
+  $('btn-action').textContent = '搜索中…';
+  $('btn-reset').textContent = '停止';
+  try {
+    const r = await ask(MSG.RESUME_RECALL);
+    if (!r.ok) throw new Error(r.error === 'no_checkpoint' ? '断点不存在，请重新搜索' : (r.error || '恢复失败'));
+    toast('已从上次停止处继续搜索');
+  } catch (e) {
+    S.busy = false;
+    $('btn-action').disabled = false;
+    $('btn-reset').textContent = '重置';
+    toast(e.message, 5000);
+    updateAction();
+  }
+});
+
 /** 清空一切：条件 + 岗位词 + 城市 + 结果，回到空白条件页 */
 function fullReset() {
-  S.companies = []; S.positions = []; S.cities = [];
-  S.filters = { hrActive: '1' };
+  S.companies = []; S.positions = []; S.cities = [{ ...ALL_COUNTRY }];   // 重置回默认：全国（2026-10-07 用户定的空选规则）
+  S.filters = {};   // HR 活跃度/福利待遇两个维度已下线（用户 2026-10-07 定），重置即全空
   S.jobs = []; S.selected = new Set(); S.greeted = false; S.taskId = null;
   S.busy = false; S.sending = false; S.sendPaused = false; S.searchStopped = false; S.hasResult = false;
+  ask(MSG.CLEAR_SEARCH_CHECKPOINT).catch(() => {});   // 重置 = 从头来，搜索断点一并清掉（需求 #11）
+  $('btn-resume-search').hidden = true;
   $('send-banner').hidden = true; exitSendingBar();
   $('search-progress').hidden = true;
   $('funnel').hidden = true;
@@ -1014,9 +1134,12 @@ $('btn-action').addEventListener('click', () => {
   if (S.sending) return S.sendPaused ? resumeSending() : pauseSending();
   if (S.screen === 'config') return runSearch();   // 时长按设置里的分钟数
   if (S.screen === 'result') {
-    if (S.greeted) return runSend();                        // AI 已生成 → 投递
     if (S.greetMode === 'custom') return runSendFromResult(); // 自定义 → 落文案后投递
-    return runGreeting();                                    // AI → 就地生成
+    const empties = emptyGreetIds();
+    if (!empties.length) {                                   // 格子全部有内容 → 一键投递
+      return S.greeted ? runSend() : runSendFromResult();    // 手动填满的走 custom 落文案（不调 AI）
+    }
+    return runGreeting(empties);                             // 有空格子 → 只生成空的
   }
   if (S.screen === 'greeting') return runSend();
   // 投递完成屏：点「完成」收尾
@@ -1129,7 +1252,13 @@ async function runSearch() {
     const byLabel = new Map(((S.dict && S.dict.industry) || []).map((o) => [o.label, o.code]));
     const industryCodes = (S.filters.industry || [])
       .map((name) => byLabel.get(name)).filter(Boolean);
-    const filters = { ...S.filters, industry: industryCodes };
+    // 工作区域存的也是名字（区名，2026-10-07 用户定区域可多选）：能按抓取字典转成
+    // 真实 code 的转 code，转不了的保留区名，布置时由 collector 按选项文字点。
+    const bdByLabel = new Map(((S.dict && S.dict.businessDistrict) || []).map((o) => [o.label, o.code]));
+    const districtVals = (S.filters.businessDistrict || []).map((v) => bdByLabel.get(v) || v);
+    const filters = { ...S.filters, industry: industryCodes, businessDistrict: districtVals };
+    // HR 活跃度/福利待遇已下线（用户 2026-10-07 定）：清掉存档里可能残留的旧值，不再发给后台
+    delete filters.hrActive; delete filters.welfare;
 
     // ★ 把岗位词语义归纳到 BOSS 职位类型的【三级叶子 code】，塞进 position 参数，
     //   让 BOSS 服务端只返回对应职能家族的岗位，从源头挡掉模糊匹配的杂项。
@@ -1202,10 +1331,18 @@ function renderSearchProgress(task) {
   $('search-phase').textContent = PHASE_TEXT[task.phase] || task.phase;
   const p = task.progress || {};
 
-  // 精投：进度% = 已执行行为数 / 总允许行为数（x/50）。剩余时间按剩余行为 × 6秒估。
+  // 进度% = 已执行行为数 / 行为预算。剩余时间：精投按剩余行为 × 6 秒估；
+  // 海投有 3 分钟硬闸（HAITOU_STOP_MINUTES），剩余 = 3 分钟 − 已用时（用户 2026-10-07 定：不写 5 分钟）。
   if (p.actionsBudget && task.phase !== 'done') {
     const pct = Math.min(99, Math.max(1, Math.round((p.actionsDone || 0) / p.actionsBudget * 100)));
-    const remainSec = Math.max(0, p.actionsBudget - (p.actionsDone || 0)) * 6;
+    let remainSec;
+    if (S.searchMode === 'position') {
+      const stopSec = (CONFIG.HAITOU_STOP_MINUTES || 3) * 60;
+      const elapsed = S.searchStartAt ? (Date.now() - S.searchStartAt) / 1000 : 0;
+      remainSec = Math.max(0, Math.round(stopSec - elapsed));
+    } else {
+      remainSec = Math.max(0, p.actionsBudget - (p.actionsDone || 0)) * 6;
+    }
     $('search-fill').style.width = `${pct}%`;
     $('search-detail').textContent =
       `${pct}% · 约还需 ${fmtMin(remainSec)} · 已收 ${p.collected || 0} 个`;
@@ -1525,6 +1662,7 @@ function buildJobCard(j) {
   ta.addEventListener('input', () => {
     S.jobGreet = S.jobGreet || {};
     S.jobGreet[j.jobId] = ta.value;
+    updateAction();   // 格子内容变化要即时翻转按钮（生成打招呼语 ↔ 一键投递）
   });
   return el;
 }
@@ -1557,6 +1695,15 @@ function orderedSelectedIds() {
 }
 /** 本批真正要处理的岗位：按显示顺序取前 SEND_CAP 个（单批上限，防封号）。*/
 function batchIds() { return orderedSelectedIds().slice(0, SEND_CAP()); }
+
+/** 本批选中岗位里「招呼语格子还是空的」jobId 列表（用户 2026-10-07 定的判定口径）：
+ *  全部有内容 → 按钮是「一键投递」；只要有一个空 → 「生成打招呼语」且只生成空的。
+ *  自定义模式填了全局招呼语时，所有格子都算有内容。 */
+function emptyGreetIds() {
+  const globalFilled = S.greetMode === 'custom' && !!(S.globalGreet || '').trim();
+  if (globalFilled) return [];
+  return batchIds().filter((id) => !((S.jobGreet?.[id] || '').trim()));
+}
 
 function visibleJobs() {
   if (!S.refineTerms || !S.refineTerms.length) return S.jobs;   // 没得筛，全给
@@ -1767,8 +1914,12 @@ $('global-greet').addEventListener('input', (e) => { S.globalGreet = e.target.va
  * AI 定制生成。不跳屏——就在当前结果页，每个岗位卡的招呼语框里就地生成。
  * 生成中卡片显示沙漏，每生成完一条（GREETING_ITEM 广播）就填进对应卡片。
  */
-async function runGreeting() {
-  const batch = batchIds();   // 本批：按显示顺序取前 75（单批上限在此生效，静默）
+async function runGreeting(onlyIds) {
+  // 只生成「空格子」的岗位（用户 2026-10-07 定）：调用方传入空格子列表；
+  // 这里再兜底过滤一次，已有内容的绝不重写。本批上限按显示顺序取前 75（静默）。
+  const batch = (Array.isArray(onlyIds) ? onlyIds : batchIds())
+    .filter((id) => !((S.jobGreet?.[id] || '').trim()));
+  if (!batch.length) { updateAction(); return; }
   const batchSet = new Set(batch);
   S.busy = true;
   S.greeted = false;
@@ -1777,14 +1928,13 @@ async function runGreeting() {
   $('btn-action').disabled = true;
   $('btn-action').textContent = `生成中 0/${S.greetTotal}…`;
 
-  // 把本批岗位的招呼语框展开，置为「生成中」沙漏态
+  // 把本批（空格子）岗位的招呼语框展开，置为「生成中」沙漏态；已填内容的卡片不碰
   for (const el of document.querySelectorAll('#job-list .jcard')) {
     if (!batchSet.has(el.dataset.jobid)) continue;
     const ta = el.querySelector('.jgreet');
     const toggle = el.querySelector('.jgreet-toggle');
     ta.hidden = false;
-    ta.value = '';
-    ta.placeholder = '⏳ 正在生成…';
+    if (!ta.value) ta.placeholder = '⏳ 正在生成…';   // 不清 value：有内容的不重写
     toggle.querySelector('.tri').textContent = '▴';
     el.classList.add('generating');
   }
@@ -1850,7 +2000,13 @@ async function onGreetingDone(task) {
     el.classList.remove('generating');
   }
   const g = task.greetStat || {};
-  if (g.failed) toast(`${g.failed} 条生成失败，用的是兜底语，可手动改`, 4000);
+  if (g.stopped) {
+    // 看门狗停的：已生成的都在卡片里，空格子的再点一次「生成打招呼语」就接着生成（只补空格）
+    toast('已停止：30 秒没有新进展。已生成的招呼语都留在卡片里，空格子的可再点一次接着生成', 6000);
+  } else if (g.failed) {
+    const why = (g.lastError || '').slice(0, 60);
+    toast(`${g.failed} 条生成失败${why ? `（${why}）` : ''}，用的是兜底语，可手动改`, 6000);
+  }
   // 生成完，底部按钮变成一键投递
   S.greetMode = S.greetMode;   // 保持
   updateAction();
@@ -2107,6 +2263,9 @@ function closeService() { $('service-mask').hidden = true; $('service-drawer').h
 $('btn-service').addEventListener('click', openService);
 $('service-close').addEventListener('click', closeService);
 $('service-mask').addEventListener('click', closeService);
+// 通用提示弹窗：点「知道了」或遮罩关闭
+$('alert-ok').addEventListener('click', hideAlert);
+$('alert-mask').addEventListener('click', hideAlert);
 
 // 客服反馈提交（需求#5）：自由文本必填 + 联系方式选填，
 // 自动带版本号/来源页/时间/设备 ID。存本地 ui:feedback，数据后台只读查看。
@@ -2177,6 +2336,7 @@ chrome.runtime.onMessage.addListener((msg) => {
       if (t.phase === 'done' || t.phase === 'aborted' || t.phase === 'error') {
         S.hasResult = true;
         loadResults().catch(() => {});
+        refreshResumeSearchBtn();   // 断点由后台在收尾时落盘，到这才查得到（需求 #11）
       }
     }
     else {
@@ -2200,43 +2360,10 @@ chrome.runtime.onMessage.addListener((msg) => {
 });
 
 // ════════════════════════════════════════════════════════════
-// 使用统计（埋点本地后台：日活 / 海投·精投点击渗透 / 投递点击渗透）
+// 使用统计区块已于 2026-10-07 从面板下线（用户定：数据是公司看的，不给用户看）。
+// 埋点仍照常采集；公司查看 = 数据后台 admin.html（密码保护，服务抽屉有内部入口）；
+// 数据传送 = SW 里每 6 小时 Tracker.flush() 定时上报（配 ANALYTICS_ENDPOINT 后生效）。
 // ════════════════════════════════════════════════════════════
-
-async function renderStats() {
-  const box = $('stats-content');
-  if (!box) return;
-  const { days: rows, total } = await Tracker.stats(30);
-  const pct = (a, b) => (b ? `${Math.round((a / b) * 1000) / 10}%` : '—');
-  const today = rows.length ? rows[rows.length - 1] : { dau: 0, ht: 0, jt: 0, send: 0 };
-  const row = (label, val, sub) =>
-    `<div class="st-row"><span class="st-label">${label}</span><span class="st-val">${val}</span><span class="st-sub">${sub}</span></div>`;
-  box.innerHTML =
-    row('今日日活', today.dau, `近 30 天累计去重 ${total.dau} 人`) +
-    row('海投点击渗透', pct(total.ht, total.dau), `${total.ht}/${total.dau} 人点过`) +
-    row('精投点击渗透', pct(total.jt, total.dau), `${total.jt}/${total.dau} 人点过`) +
-    row('一键投递渗透', pct(total.send, total.dau), `${total.send}/${total.dau} 人点过`);
-}
-
-$('stats-head').addEventListener('click', () => {
-  const body = $('stats-body');
-  body.hidden = !body.hidden;
-  $('stats-head').querySelector('.fold-arrow').textContent = body.hidden ? '▸' : '▾';
-  if (!body.hidden) renderStats();
-});
-
-$('btn-stats-export').addEventListener('click', async () => {
-  const csv = await Tracker.exportCsv(90);
-  const d = new Date();
-  const p = (n) => String(n).padStart(2, '0');
-  const stamp = `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
-  a.download = `闪投使用统计-${stamp}.csv`;
-  a.click();
-  URL.revokeObjectURL(a.href);
-  toast('已导出 CSV');
-});
 
 (async function boot() {
   // 默认全部「不限」，与同类产品一致。
@@ -2257,6 +2384,16 @@ $('btn-stats-export').addEventListener('click', async () => {
   const CODE_BY_LABEL = Object.fromEntries([...HOT_CITIES, ...MORE_CITIES].map((c) => [c.label, c.code]));
   S.cities = S.cities.map((c) => (CODE_BY_LABEL[c.label] && CODE_BY_LABEL[c.label] !== c.code)
     ? { ...c, code: CODE_BY_LABEL[c.label] } : c);
+  // 城市规则对齐（2026-10-07 用户定）：全国与具体城市互斥；一个都不选时自动补全国；
+  // 工作区域只展最后选择的城市，清掉存档里不属于当前展示城市的已选区名
+  if (S.cities.some((c) => c.code !== ALL_COUNTRY.code)) {
+    S.cities = S.cities.filter((c) => c.code !== ALL_COUNTRY.code);
+  }
+  if (!S.cities.length) S.cities = [{ ...ALL_COUNTRY }];
+  {
+    const dn = currentDistrictNames();
+    S.filters.businessDistrict = (S.filters.businessDistrict || []).filter((v) => dn.includes(v));
+  }
   S.searchOverrides = st['jt:searchOverrides'] || {};
   S.brandOverrides = st['jt:brandOverrides'] || {};
   // 搜索时长固定，不再从存储读用户值
@@ -2269,8 +2406,7 @@ $('btn-stats-export').addEventListener('click', async () => {
   renderFilters();
   updateAction();
 
-  Tracker.track('panel_open');   // 埋点：使用日活（打开面板即算活跃）
-  renderStats();
+  Tracker.track('panel_open');   // 埋点：使用日活（打开面板即算活跃；面板不展示统计，数据进本地队列+定时上报）
 
   try {
     const r = await ask(MSG.GET_RESUME);

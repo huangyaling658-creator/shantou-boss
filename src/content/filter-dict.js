@@ -201,12 +201,6 @@ const FilterDict = {
       const v = filters[key];
       if (v) u.searchParams.set(key, Array.isArray(v) ? v.join(',') : v);
     }
-    // HR 活跃度。BOSS 页面上这一项的参数名随版本有过变化，两个都带上，
-    // 平台会忽略它不认识的参数
-    if (filters.hrActive) {
-      u.searchParams.set('jobActive', filters.hrActive);
-      u.searchParams.set('activeTime', filters.hrActive);
-    }
     return u.toString();
   },
 };

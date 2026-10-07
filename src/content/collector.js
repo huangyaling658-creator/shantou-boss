@@ -462,6 +462,118 @@ const Collector = {
     return { ok: true, via: btn ? 'button' : 'enter' };
   },
 
+  /**
+   * 海投 v2 布置：在结果页筛选栏上「像人一样」点一个筛选项。
+   *
+   * BOSS 结果页的筛选项都是 <a href="…/web/geek/job?…&key=code"> 链接
+   * （filter-dict.js 抓字典就靠这个），所以按「参数名=code」在 href 里找
+   * 目标锚点再 click，比按显示文案匹配稳——面板的选项文案和页面文案
+   * 不完全一致（如「应届生(校招)」vs「应届生」、行业是自定义名）。
+   *
+   * 已选中（当前 URL 已带 key=code）→ skipped；找不到锚点 → ok:false，
+   * 由 SW 退回 URL 导航补上，保证条件不丢。
+   * 点击会触发整页导航，所以先返回再延时点击，避免响应被卸载冲掉。
+   */
+  // 筛选栏各维度的显示名（新版筛选栏全是折叠下拉：选项不可见时先按这个点开维度再找）
+  _FILTER_LABELS: { businessDistrict: '工作区域', position: '职位类型', jobType: '求职类型', salary: '薪资待遇', experience: '工作经验', degree: '学历要求', industry: '公司行业', scale: '公司规模', stage: '融资阶段' },
+  _findFilterAnchor(key, code) {
+    const anchors = [...document.querySelectorAll('a[href*="/web/geek/job"]')];
+    return anchors.find((a) => {
+      if (a.offsetHeight === 0) return false;                       // 不可见的不点
+      const label = (a.textContent || '').trim();
+      if (!label || label.length > 12) return false;                // 筛选项都是短文案，长的不是
+      try {
+        const v = new URL(a.getAttribute('href'), location.origin).searchParams.get(key);
+        return v && v.split(',').includes(String(code));
+      } catch (e) { return false; }
+    });
+  },
+  // 按选项文字找锚点：工作区域没抓到真实 code 时按区名点（2026-10-07 用户定的链路，
+  // 面板内置了各城市行政区表，选中存区名）。
+  _findFilterAnchorByText(text) {
+    const want = String(text || '').trim();
+    if (!want || want.length > 12) return null;
+    return [...document.querySelectorAll('a[href*="/web/geek/job"]')]
+      .find((a) => a.offsetHeight > 0 && (a.textContent || '').trim() === want);
+  },
+  async applyFilterByCode(key, code) {
+    if (!key || !code) return { ok: false, reason: 'bad_args' };
+    const cur = new URL(location.href).searchParams.get(key);
+    if (cur && cur.split(',').includes(String(code))) return { ok: true, skipped: 'already' };
+    let target = this._findFilterAnchor(key, code);
+    if (!target && this._FILTER_LABELS[key]) {
+      // 选项藏在折叠下拉里：像人一样先点开这个维度（按显示名找筛选栏上的维度钮），再找选项
+      const dimLabel = this._FILTER_LABELS[key];
+      const opener = [...document.querySelectorAll('a, span, div, li')]
+        .find((el) => el.offsetHeight > 0 && (el.textContent || '').trim() === dimLabel);
+      if (opener) {
+        opener.click();
+        await U.sleep(U.randInt(400, 800));
+        target = this._findFilterAnchor(key, code);
+      }
+    }
+    // 按 code 找不到 → 按选项文字再找一次（工作区域的区名走这条路）
+    if (!target) target = this._findFilterAnchorByText(code);
+    if (!target) return { ok: false, reason: 'option_not_found' };
+    const label = (target.textContent || '').trim();
+    setTimeout(() => target.click(), 50);
+    return { ok: true, label };
+  },
+
+  // ── 海投 v2 布置地点：点页面上的城市选择器（真人链路）──
+  // 实测 /web/geek/jobs 列表页不吃 URL 的 city 参数（带 city=101280600 打开仍显示
+  // 默认城市，城市由页面按 IP/cookie 定），所以地点必须像人一样在页面上点出来。
+  /** 找「当前城市」chip：class 含 city、可见、文本是 2~4 个汉字的元素。 */
+  _findCityChip() {
+    const els = [...document.querySelectorAll('[class*="city" i]')];
+    for (const el of els) {
+      if (el.offsetHeight === 0) continue;
+      const t = (el.textContent || '').trim();
+      if (!/^[\u4e00-\u9fa5]{2,4}$/.test(t)) continue;
+      if (t === '城市' || t === '切换城市') continue;
+      return { el, text: t };
+    }
+    return null;
+  },
+  /** 读当前城市 chip 文本（SW 用来校验地点布置有没有生效）。 */
+  readCityChip() {
+    const chip = this._findCityChip();
+    return { ok: !!chip, text: chip ? chip.text : '' };
+  },
+  /**
+   * 点城市选择器选城市：点 chip 开弹层 → 在弹层里找目标城市
+   * （优先 href 带 city=code 的锚点，其次文本精确等于城市名的可见项）→ 点。
+   * 点击可能触发整页导航，所以先返回再延时点击（同 applyFilterByCode）。
+   */
+  async applyCity(code, name) {
+    if (!code && !name) return { ok: false, reason: 'bad_args' };
+    const chip = this._findCityChip();
+    if (chip && name && chip.text === name) return { ok: true, skipped: 'already', chipText: chip.text };
+    if (!chip) return { ok: false, reason: 'no_chip' };
+    chip.el.click();
+    await U.sleep(U.randInt(500, 900));
+    let opt = null;
+    if (code) {
+      opt = [...document.querySelectorAll('a[href*="city="]')]
+        .find((a) => a.offsetHeight > 0 && (a.getAttribute('href') || '').includes(`city=${code}`));
+    }
+    if (!opt && name) {
+      opt = [...document.querySelectorAll('a, li, span, div')].find((el) => {
+        if (el.offsetHeight === 0) return false;
+        const t = (el.textContent || '').trim();
+        if (t !== name) return false;
+        // 父容器里还得有别的城市名（说明是城市选择弹层），避开页面上无关的同名文本
+        const p = el.parentElement;
+        return p && (p.textContent || '').trim().length > name.length;
+      });
+    }
+    if (!opt) return { ok: false, reason: 'option_not_found', chipText: chip.text };
+    const target = opt;
+    setTimeout(() => target.click(), 50);
+    return { ok: true, clicked: true, chipText: chip.text };
+  },
+
+
   // ── 海投 v2：滚动读卡（真人链路第 4 步：一路往下滚，一次滚动 = 一个行为）──
   _scrollSeen: null,
   resetScroll() { this._scrollSeen = new Map(); },

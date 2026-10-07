@@ -44,6 +44,13 @@
   </div>
 </div>
 
+<!-- 通用提示弹窗（如：目标公司最多选 3 家，需求清单 #10） -->
+<div class="drawer-mask" id="alert-mask" hidden></div>
+<div class="alert-box" id="alert-box" hidden>
+  <div class="alert-msg" id="alert-msg"></div>
+  <button class="btn primary alert-btn" id="alert-ok">知道了</button>
+</div>
+
 <!-- ══════════════ 条件设置 ══════════════ -->
 <div class="screen on" id="screen-config">
 
@@ -64,6 +71,19 @@
     <input type="file" id="file-input" accept="image/*" multiple hidden>
   </section>
 
+  <section class="sec" id="sec-position">
+    <h2>期望职位</h2>
+    <div class="search">
+      <input type="text" id="position-search" placeholder="搜索岗位…">
+      <span class="clear" data-clear="position-search">×</span>
+    </div>
+    <div id="position-result"></div>
+    <div class="picked-wrap" id="position-picked" hidden>
+      <div class="picked-label">已选岗位</div>
+      <div class="chips" id="position-selected"></div>
+    </div>
+  </section>
+
   <section class="sec" id="sec-city">
     <h2>目标城市</h2>
     <div class="search">
@@ -75,19 +95,6 @@
     <div class="picked-wrap" id="city-picked" hidden>
       <div class="picked-label">已选城市</div>
       <div class="chips" id="city-selected"></div>
-    </div>
-  </section>
-
-  <section class="sec" id="sec-position">
-    <h2>期望职位</h2>
-    <div class="search">
-      <input type="text" id="position-search" placeholder="搜索岗位…">
-      <span class="clear" data-clear="position-search">×</span>
-    </div>
-    <div id="position-result"></div>
-    <div class="picked-wrap" id="position-picked" hidden>
-      <div class="picked-label">已选岗位</div>
-      <div class="chips" id="position-selected"></div>
     </div>
   </section>
 
@@ -114,15 +121,8 @@
     </div>
   </section>
 
-  <!-- 使用统计（埋点本地后台：日活 / 海投·精投点击渗透 / 投递点击渗透）-->
-  <section class="fold-sec" id="stats-sec">
-    <div class="fold-head" id="stats-head"><span class="fold-arrow">▸</span> 使用统计</div>
-    <div class="fold-body" id="stats-body" hidden>
-      <div id="stats-content" class="stats-content"></div>
-      <div class="stats-note">当前为本机统计（匿名 ID 去重，不含任何个人资料）；接入云端后台后可看多用户汇总。</div>
-      <button id="btn-stats-export" class="btn ghost" style="width:100%">导出近 90 天 CSV</button>
-    </div>
-  </section>
+  <!-- 使用统计区块已于 2026-10-07 按用户要求下线：数据是公司看的，不给用户看。
+       埋点照常采集（Tracker），公司查看走密码保护的数据后台 admin.html（服务抽屉里有内部入口）。 -->
 
 </div>
 
@@ -211,6 +211,7 @@
 <footer class="actionbar">
   <div class="action-row">
     <span id="action-count" class="action-count" hidden></span>
+    <button id="btn-resume-search" class="btn ghost" hidden>恢复搜索</button>
     <button id="btn-reset" class="btn ghost">重置</button>
     <button id="btn-action" class="btn primary">开始搜索</button>
     <button id="btn-action2" class="btn primary" hidden>深搜10min</button>
