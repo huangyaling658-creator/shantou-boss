@@ -254,3 +254,9 @@ AI 提出了「海投单元键 cityCode|kw、精投单元为公司名（没定�
 AI 提出了「#1 屬設計問題，先給方案對比待拍板：A 公司網关中轉（推薦，插件一個 key 都不放、服務器存真 key 轉發 DashScope，順帶限流/配額/使用統計，與 ANALYTICS_ENDPOINT 同一個後台）B 用戶自填 key（BYOK）C 混淆隨包發（等於沒防，不做）；#2 看門狗落在 doGreeting：30 秒無新產出置 stopRequested 停整批，已生成的本來就實時落庫+廣播進卡片、停了不丟，空格可再點接著補；#4 收尾 toast 帶失敗原因」的修改方向 ;
 AI 提出了「看門狗要真停得住，卡住的步驟必須自己有超時：askTab 加可選超時參數（採集類長操作故意不傳、行為不變），抓 JD 傳 20 秒（JD_FETCH_TIMEOUT_MS）——這段以前無超時，是 0/75 卡死的根因；LLM 調用本來就有 30 秒超時」的修改方法 ;
 修改的内容：修改 src/shared/constants.js（CONFIG 新增 GREETING_STALL_MS=30000、JD_FETCH_TIMEOUT_MS=20000）；修改 src/background/service-worker.js（askTab 加可選 timeoutMs 用 U.withTimeout；doGreeting 新增看門狗：setInterval 5 秒盯 lastProgressAt、超時 stalled=true 並置 stopRequested、emit 更新 lastProgressAt、Promise.all 外包 try/finally clearInterval、FETCH_JD 傳 20 秒超時、greetStat 新增 stopped）；修改 src/panel/panel.js（onGreetingDone：stopped→提示「已停止：30 秒沒有新進展，已生成的留在卡片裡，空格可再點接著生成」；failed→toast 帶 lastError 前 60 字）；修改 docs/DEVELOPMENT.md（§2 補「生成看門狗」條目與「模型密钥防偷」待辦）；3 個 JS 文件通過 node --check；未實跑（需重載擴展驗證：正常生成不受影響；人為斷網/風控時 30 秒自停、已生成保留）; 另：QWEN_KEY 目前仍是空（secrets.js），AI 生成/打分在 key 補回或網關落地前只會出走兜底語，已向用戶如實說明 ;
+---
+時間 2026-10-08 01:02:58 ;
+用戶 提出了「不用動了。把現在這個版本上傳到 github」的要求 ;
+AI 提出了「把 10-07~08 全部未推送改动整体提交并推送到共用仓库 main 分支（huangyaling658-creator/shantou-boss）」的修改方向 ;
+AI 提出了「沿用上一次推送的 git 身份（edwardlsf <edwardlsf@users.noreply.github.com>，从 commit 5341004 的作者信息取），本仓库 local 配置」的修改方法 ;
+修改的内容：git add -A 后整体提交 ccab1e3「闪投 2026-10-07~08：布置链路定稿 + 城市区域联动 + 恢复搜索 + 上线需求 P0 补齐」（13 个文件，+931/-250，含本笔记），git push origin main 成功（5341004..ccab1e3）；本仓库 local 配置了 user.name/user.email（沿用 5341004 的作者身份）；如实备注：secrets.js 的 QWEN_KEY 仍为空字符串，仓库不含真实密钥 ;
