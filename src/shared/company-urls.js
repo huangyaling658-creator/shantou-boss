@@ -43,28 +43,28 @@ const COMPANY_URL_LIST = [
   { names: ['月之暗面', 'Moonshot', 'Kimi'], url: 'https://www.zhipin.com/gongsi/job/f0fe9220123c051b03152d-4FVI~.html?ka=company-jobs' },   // 出处：2026-10-08 用户提供
   { names: ['智谱AI', '智谱'], url: 'https://www.zhipin.com/gongsi/job/18815b858c0b88250nd72N66Fw~~.html?ka=company-jobs' },   // 出处：2026-10-08 用户提供
   { names: ['MiniMax', 'minimax'], url: 'https://www.zhipin.com/gongsi/job/2c7c394fdf91db2d1XR42dy0EFo~.html?ka=company-jobs' },   // 出处：2026-10-08 用户提供
-  { names: ['阶跃星辰'], url: '' },   // 待填
+  { names: ['阶跃星辰'], url: 'https://www.zhipin.com/gongsi/job/0591ce5cac2618c303N43dm0F1o~.html?ka=company-jobs' },   // 待填
   { names: ['DeepSeek', '深度求索'], url: 'https://www.zhipin.com/gongsi/job/ffd531b0cbd4133f1XN92Nm0EFU~.html?ka=company-jobs' },   // 待填
-  { names: ['百川智能'], url: '' },   // 待填
-  { names: ['零一万物'], url: '' },   // 待填
-  { names: ['生数科技'], url: '' },   // 待填
-  { names: ['爱诗科技'], url: '' },   // 待填
-  { names: ['商汤'], url: '' },   // 待填
-  { names: ['旷视'], url: '' },   // 待填
-  { names: ['出门问问'], url: '' },   // 待填
-  { names: ['面壁智能'], url: '' },   // 待填
-  { names: ['无问芯穹'], url: '' },   // 待填
+  { names: ['百川智能'], url: 'https://www.zhipin.com/gongsi/job/8d42a94fe13be56c03N43t-7GVU~.html?ka=company-jobs' },   // 待填
+  { names: ['零一万物'], url: 'https://www.zhipin.com/gongsi/job/6604fa28d0b480c11X1y09-6FFc~.html?ka=company-jobs' },   // 待填
+  { names: ['生数科技'], url: 'https://www.zhipin.com/gongsi/job/f7c9e38b0683800a1Xx-2tW5FFY~.html?ka=company-jobs' },   // 待填
+  { names: ['爱诗科技'], url: 'https://www.zhipin.com/gongsi/job/846753040df0fa341XJ83NS0FFQ~.html?ka=company-jobs' },   // 待填
+  { names: ['商汤'], url: 'https://www.zhipin.com/gongsi/job/bf15d825d6d786d833dz2tu8Fw~~.html?ka=company-jobs' },   // 待填
+  { names: ['旷视'], url: 'https://www.zhipin.com/gongsi/job/075e0d17cd137e971nV43NU~.html?ka=company-jobs' },   // 待填
+  { names: ['出门问问'], url: 'https://www.zhipin.com/gongsi/job/1f115e0fa9d1944a1nFz39u_.html?ka=company-jobs' },   // 待填
+  { names: ['面壁智能'], url: 'https://www.zhipin.com/gongsi/4d17ac830d700dea1XZ_3dq1FVU~.html?from=top-card' },   // 待填
+  { names: ['无问芯穹'], url: 'https://www.zhipin.com/gongsi/job/75e9c4e4f7940ab41XNz2dm-FVI~.html?ka=company-jobs' },   // 待填
 
   // ── 音乐泛娱乐（9）──
   { names: ['腾讯音乐', 'TME'], url: 'https://www.zhipin.com/gongsi/job/58c878aa23085dec1XB70tm1FFI~.html?ka=company-jobs' },   // 待填
   { names: ['网易云音乐'], url: 'https://www.zhipin.com/gongsi/4cd458bd743625a11Xdy0t61.html?from=top-card' },   // 待填
-  { names: ['汽水音乐'], url: '' },   // 待填
+  { names: ['汽水音乐'], url: 'https://www.zhipin.com/gongsi/job/f409f37f83a6135b0nV_2d25EA~~.html?ka=company-jobs' },   // 待填
   { names: ['喜马拉雅'], url: '' },   // 待填
   { names: ['荔枝'], url: '' },   // 待填
   { names: ['小宇宙'], url: '' },   // 待填
-  { names: ['爱奇艺'], url: '' },   // 待填
-  { names: ['芒果TV', '芒果'], url: '' },   // 待填
-  { names: ['阅文集团', '阅文'], url: '' },   // 待填
+  { names: ['爱奇艺'], url: 'https://www.zhipin.com/gongsi/job/ab0ee64deb5cf6fe1HB609u5FFc~.html?ka=company-jobs' },   // 待填
+  { names: ['芒果TV', '芒果'], url: 'https://www.zhipin.com/gongsi/job/d619057f23faadf233F70tw~.html?ka=company-jobs' },   // 待填
+  { names: ['阅文集团', '阅文'], url: 'https://www.zhipin.com/gongsi/0a68dd7f498a6f181XV63N24E1M~.html?from=top-card' },   // 待填
 
   // ── 游戏内容（7）──
   { names: ['米哈游'], url: 'https://www.zhipin.com/gongsi/job/9f8c95b92321a8e11nJz2Nu7.html?ka=company-jobs' },   // 待填

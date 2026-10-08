@@ -60,21 +60,27 @@
   （c101010100=北京、c101210100=杭州，即面板 S.cities 的 BOSS 码）；薪资 = 参数
   `?salary=402~407`（402=3K以下 403=3-5K 404=5-10K 405=10-20K 406=20-50K 407=50K以上，
   **与面板 OPT.salary 的 code 完全一致**，直接用 config.filters 的码不用 label 映射）；
-  岗位词 = `?query=`。不限 = 不带参数。
+  经验 = `?experience=码`、学历 = `?degree=码`（10-08 晚用户全维样本：
+  `/gongsi/job/c101010100/{brandId}.html?degree=209&experience=108&salary=402&query=词`，
+  码表与海投同源）；岗位词 = `?query=`。不限 = 不带参数。
 - 流程：核对页头通过 → 从当前 URL 抽 brandId → 拼最终 URL（招聘职位+搜词+布置一次到位）→
   `tabs.update` 导航 → `COMPANY_JOBS_READY` 轮询就绪 → 照旧扫卡翻页。
-- **经验/学历是安慰剂**（2026-10-08 用户定：「先让用户能选，但不影响搜索，哄人用的」）——
-  面板选项照选照存，但不进 URL、不参与本地过滤、对搜索结果零影响，diag 也不提。
-  多选薪资/城市无码 → 该维走本地过滤。diag 记 `布置:城市✈北京 薪资✈20-50K(406)`。
+- **经验/学历 2026-10-08 晚转正进 URL**（用户全维样本实锤：公司职位页吃
+  `?degree=209&experience=108&salary=402`，筛选栏对应 chip 显示选中）——白天的「安慰剂」
+  决定作废。**公司页三下拉均为单选**（同日用户截图实锤：工作经验 108,102-107 / 学历
+  209,208,206,202-205 / 薪资 402-407，码序与面板 OPT 一致）：面板多选时**取第一个**进 URL，
+  diag 如实注明「单选取首」。该单选结论用户定：**预设为精投独享**，海投仍按搜索页样本
+  走多选逗号连，互不回推。
+  多选薪资/城市无码 → 该维走本地过滤。diag 记 `布置:城市✈北京 薪资✈20-50K(406) 经验✈在校生 学历✈本科`。
 - **取证**：导航后把真实 URL 写进 diag「布置后URL:…」（用户报「仍然无效」后加）——
   URL 里有 c码/参数 = 导航成了（无效则是 BOSS 没认参数）；没有 = 导航没成（查「布置网址异常」行）。
 - **贴网址单元顺带修复**：brandOverrides 分支不再停留简介页——直接拼职位页 URL
-  （含 query/city/salary）一步到位。
+  （含 query/city/salary/experience/degree）一步到位。
 - 下拉点击版（applyCompanyFilters/findPanel/realClick/COMPANY_BOX_ENSURE）**保留不删但不再调用**：
   BOSS 若改 URL 结构可切回。其间的排查结论存档：BOSS 下拉监听 mousedown 系事件，
   合成 click() 开不了面板；选项面板挂 body（portal）；「职位类型」行是假面板。
-- 本地过滤（SW，runRecall 公司分支，接在现有城市过滤后）：**只留薪资一维**（经验/学历改安慰剂后
-  不再本地筛，matchExperience/matchDegree 已删）。
+- 本地过滤（SW，runRecall 公司分支，接在现有城市过滤后）：**只留薪资一维**（经验/学历
+  已进 URL 由服务端筛，本地不再碰）。
   **没抓到标签、写「不限」、薪资面议的一律保留**（宁可多给）；**筛完归零 → 放弃该维**（方案B精神，cut 数记 `funnel.localFilterCut`）。
 - 卡片经验/学历标签：`collectOneDomPage` 逐行扫 innerText 正则认（行宽≤12 字防误吃岗位名），
   填进 `job.experience/job.degree`（normalizeJob 本来就有这两个字段，以前传空串）。

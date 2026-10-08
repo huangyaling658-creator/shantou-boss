@@ -282,8 +282,9 @@ async function runHaitouScroll(config, merged, onProgress) {
 }
 
 // ── 精投布置 + 本地过滤（2026-10-08 用户定）──────────────────────
-// 公司页筛选：城市+薪资走 URL 布置（服务端筛），多选薪资走本地筛。
-// 经验/学历是安慰剂（用户定：能选但不影响搜索），不进 URL 也不本地筛。
+// 公司页筛选：城市(路径前缀)+薪资(单选)+经验+学历走 URL 布置（服务端筛，
+// 10-08 晚用户全维样本实锤 degree/experience 也吃参数，「安慰剂」决定作废），
+// 薪资多选走本地筛。
 
 const _normSel = (s) => String(s || '').replace(/[（(][^)）]*[)）]/g, '').replace(/\s+/g, '').replace(/经验|学历/g, '');
 
@@ -551,16 +552,28 @@ async function augmentFromCompanyPages(merged, config, onProgress) {
       // 用户抓样本反解：简介页 /gongsi/{brandId}.html?ka=company-intro；招聘职位 =
       // /gongsi/job/{brandId}.html?ka=company-jobs；搜词 = ?query=词；城市 = 路径前缀
       // /gongsi/job/c{码}/（码 = 面板 S.cities 的 BOSS 码）；薪资 = ?salary=402~407（与面板
-      // OPT.salary 的 code 一致）。核对页头已通过 → 从当前 URL 抽 brandId（贴网址分支直接用
-      // bid0）→ 拼最终 URL 一次 tabs.update。经验/学历是安慰剂：不进 URL、不参与过滤。
-      // 薪资多选/城市无码 → 不带参数，薪资多选走本地过滤（runRecall 里）。
+      // OPT.salary 的 code 一致）；经验/学历也吃 URL（用户 2026-10-08 全维样本实锤：
+      // ?degree=209&experience=108&salary=402，此前的「安慰剂」决定作废转正）。
+      // 公司页三下拉均为**单选**（同日用户截图实锤：工作经验 108,102-107 / 学历
+      // 209,208,206,202-205 / 薪资 402-407，码序与面板 OPT 一致）——面板多选时取第一个
+      // 进 URL，diag 如实注明「单选取首」。该单选结论用户定：**预设为精投独享**，
+      // 海投仍按搜索页样本走多选逗号连，互不回推。
+      // 核对页头已通过 → 从当前 URL 抽 brandId（贴网址分支直接用 bid0）→ 拼最终 URL 一次
+      // tabs.update。薪资多选/城市无码 → 不带参数，薪资多选走本地过滤（runRecall 里）。
       const q = u.kw || '';
       const salarySel = ((config.filters && config.filters.salary) || []).filter((c) => c);
       const salaryCode = salarySel.length === 1 ? String(salarySel[0]) : '';
+      const expSel = ((config.filters && config.filters.experience) || []).filter((c) => c).map(String);
+      const degSel = ((config.filters && config.filters.degree) || []).filter((c) => c).map(String);
+      const expCode = expSel[0] || '';   // 公司页单选：多选取首
+      const degCode = degSel[0] || '';
       const cityCode = u.city ? codeOfCity(u.city) : '';
+      const fl = config.filterLabels || {};
       const urlBits = [];
       if (u.city) urlBits.push(cityCode ? `城市✈${u.city}` : '城市→本地筛(无码)');
-      if (salarySel.length) urlBits.push(salaryCode ? `薪资✈${((config.filterLabels || {}).salary || [])[0] || salaryCode}` : '薪资→本地筛(多选)');
+      if (salarySel.length) urlBits.push(salaryCode ? `薪资✈${(fl.salary || [])[0] || salaryCode}` : '薪资→本地筛(多选)');
+      if (expSel.length) urlBits.push(`经验✈${(fl.experience || [])[0] || expCode}${expSel.length > 1 ? '(单选取首)' : ''}`);
+      if (degSel.length) urlBits.push(`学历✈${(fl.degree || [])[0] || degCode}${degSel.length > 1 ? '(单选取首)' : ''}`);
       diag.push({ company: t.company, step: '布置:' + (urlBits.join(' ') || '无条件可布置') });
       let jobsReady = false;
       try {
@@ -574,7 +587,9 @@ async function augmentFromCompanyPages(merged, config, onProgress) {
         const nu = new URL(`${BOSS.ORIGIN}/gongsi/job/${cityCode ? 'c' + cityCode + '/' : ''}${bid}.html`);
         if (q) nu.searchParams.set('query', q);
         if (salaryCode) nu.searchParams.set('salary', salaryCode);
-        if (!q && !salaryCode) nu.searchParams.set('ka', 'company-jobs');   // 无参数时带上 ka，跟人点 tab 一样
+        if (expCode) nu.searchParams.set('experience', expCode);
+        if (degCode) nu.searchParams.set('degree', degCode);
+        if (!q && !salaryCode && !expCode && !degCode) nu.searchParams.set('ka', 'company-jobs');   // 无参数时带上 ka，跟人点 tab 一样
         // 贴网址/列表命中时分页已停在招聘职位页：若最终 URL 与当前 URL 一致（无词无薪资
         // 无城市码），不用再 tabs.update 白刷一次（2026-10-08 用户把列表网址改成职位页形态
         // 后，「核对页头 → 布置导航」经常其实是同一页）。不一致才导航。
@@ -1019,8 +1034,8 @@ async function runRecall(config = {}) {
     }
 
     // ── 精投本地过滤：只留薪资（2026-10-08 用户定）──
-    // 经验/学历是安慰剂（用户 2026-10-08 定：「先让用户能选，但不影响搜索」）——
-    // 选项照选，不进 URL、不在本地筛、对结果零影响。薪资多选时 URL 放不下，
+    // 经验/学历已于 10-08 晚转正进 URL（用户全维样本实锤公司页吃 degree/experience），
+    // 由服务端筛，本地不再碰。薪资多选时 URL 只放单选，
     // 这里按用户所选在本地筛一道。卡片没抓到标签的、写「不限」的、薪资面议的
     // 一律保留（宁可多给）；筛完归零 → 放弃该维，别让用户空手。
     if (mode === 'company') {
