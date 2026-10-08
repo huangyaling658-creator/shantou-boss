@@ -534,3 +534,13 @@ AI 執行了「git add -A + commit + push：提交 c5c1c84，5 個文件（servi
 用戶 提出了「精搜這邊的佈置同步上」+ 兩條樣本（基礎頁 /gongsi/job/{brandId}.html?ka=company-jobs；每項選一個 /gongsi/job/c101010100/{brandId}.html?degree=209\&experience=108\&salary=402\&query=词）+ 截圖（工作城市(1) chip 顯示選中）的要求——公司職位頁也吃 degree/experience 參數，白天的「安慰剂」決定作廢轉正 ;  
 AI 提出了「onePass 拼最終 URL 段加經驗/學歷兩維：單選進 URL（用戶樣本實錘），多選逗號連（公司頁多選未實測，形態與海投一致）；diag 佈置行補 經驗✈/學歷✈；ka=company-jobs 兜底條件改為四維全空才帶；本地過仍只留薪資（經驗/學歷由服務端篩，本地不再碰）」的修改方法 ;  
 修改的内容：修改 src/background/service-worker.js（onePass 加 expSel/degSel 進 URL + urlBits 佈置行 + ka 兜底條件；§精投佈置+本地過濾頭註、runRecall 本地過濾註釋同步改寫——「安慰剂」字樣清除）；修改 docs/DEVELOPMENT.md（§1.3a URL 規律補 degree/experience、安慰剂條目改寫為轉正、貼網址單元參數清單補齊）；service-worker.js 通過 node --check；node 對拍用戶全維樣本：路徑一致、參數一致（僅順序不同）；無條件兜底 ka=company-jobs 正確；未實跑（重載後精投 diag『布置:』行應出現 經驗✈/學歷✈，『布置后URL』帶 experience=/degree=）;
+---
+時間 2026-10-08 23:12:31 ;
+用戶 提出了「現在這版本先上傳g」+「解釋太多了（搜索漏斗截圖：布置/布置后URL/份额回流刷一屏）」+「為啥有失敗和跳過，要解釋，反而成功的就說成功多少份就好（投遞完成屏截圖）」的要求 ;
+AI 提出了「兩處展示精簡：①搜索漏斗 renderFunnel 的 diag 步驟行按異常/失敗類關鍵詞過濾（不吻合/没等到/没找到/没驱动/没就绪/没定位/没从/无响应/失效/异常/限流/重做 才上面板），定位/布置/布置后URL/份额回流/份额用完等成功過程行隱藏——成功單元只剩『公司·词@城市 N个』；②投遞結果屏已投不逐條列，開頭一行『已投 N个』報總數，失敗/跳過逐條帶原因不變」的修改方向 ;
+AI 提出了「取證不丟：SW 的 diag 改 Proxy，push 時全量鏡像 console.log('[闪投][diag]')——面板瘦了但排查渠道還在，且不用改 17 處推送點」的修改方法 ;
+修改的内容：修改 src/background/service-worker.js（diag 聲明改 Proxy 鏡像 Console）；修改 src/panel/panel.js（renderFunnel 步驟行過濾+註釋、renderSendProgress 已投彙總行+跳過逐條）；2 個 JS 文件通過 node --check；node 實測：Proxy push/length/for..of/JSON 全正常、13 條典型步驟行的面板顯隱全部符合預期；已推 GitHub 兩個提交：4b6016a（精投經驗/學歷轉正+單選取首）、1f9f783（面板精簡）；未實跑（重載後：搜索結果應只剩『搜到195个 · 公司·词@城市 N个』+ 異常行；投遞完成屏應只剩『已投19个』一行 + 失敗/跳過帶原因）;
+---
+時間 2026-10-08 23:41:33 ;
+用戶 提出了「1f9f783 這個取消」的要求（先問「两个提交都已上 GitHub」啥意思，解釋 commit/push 概念後，用戶決定取消面板精簡那個提交） ;
+AI 執行了「①先 stash 保護筆記未提交改動 → ②git reset --hard HEAD~1 回退 1f9f783 → ③git push --force 覆蓋遠端 main（1f9f783...4b6016a forced update）→ ④stash pop 恢復筆記」四步；撤掉的改動：面板解釋精簡（搜索漏斗步驟行過濾、投遞屏已投彙總行）與 SW diag→Console 鏡像——代碼回到 4b6016a（精投經驗/學歷轉正+單選取首）狀態，即「解釋多」的展示行為恢復原樣；保留的：4b6016a 及之前的全部改動 ; 未實跑（本地與 GitHub 現在都是 4b6016a，reload 擴展即回到精簡前的面板展示）;

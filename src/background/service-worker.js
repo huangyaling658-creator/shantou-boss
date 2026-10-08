@@ -327,7 +327,18 @@ async function augmentFromCompanyPages(merged, config, onProgress) {
   const posWords = (config.positions || []).filter(Boolean);
   const queries = posWords.length ? posWords : [''];   // 没填岗位词就拉这家公司全部岗
 
-  const diag = [];
+  // diag 全量镜像到 SW Console（2026-10-08 用户定稿：面板成功的只报份数、失败/异常才解释；
+  // 过程取证行「定位/布置/布置后URL/份额回流」上面板会刷屏，挪去 Console 看 [闪投][diag]）。
+  const diag = new Proxy([], {
+    set(target, prop, value) {
+      target[prop] = value;
+      if (prop !== 'length' && !isNaN(+prop)) {
+        const e = value || {};
+        console.log('[闪投][diag]', e.company || '', e.step || `${e.keyword || ''} ${e.got ?? ''}个`);
+      }
+      return true;
+    },
+  });
   const brandMiss = [];   // 没定位到的公司名（首页→搜→点卡→核对 全走完仍没进对门），实时+最终都报给用户
   augmentFromCompanyPages._diag = diag;
   augmentFromCompanyPages._brandMiss = brandMiss;

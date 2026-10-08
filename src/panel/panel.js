@@ -1470,7 +1470,12 @@ function renderFunnel(task) {
       no_new_items: '无新增停', soft_block_37: '被限流',
     };
     for (const d of f.companyDiag) {
-      if (d.step) { rows.push(`<span class="cut">${esc(d.company)}：${esc(d.step)}</span>`); continue; }
+      if (d.step) {
+        // 2026-10-08 用户定稿：成功的只报份数；失败/异常类步骤要解释——
+        // 过程行（定位/布置/布置后URL/份额回流/份额用完）不上面板，全量仍在 SW Console。
+        if (!/不吻合|没等到|没找到|没驱动|没就绪|没定位|没从|无响应|失效|异常|限流|重做/.test(d.step)) continue;
+        rows.push(`<span class="cut">${esc(d.company)}：${esc(d.step)}</span>`); continue;
+      }
       const why = STOP[d.stop] || d.stop || '';
       const kw = d.keyword ? `·${esc(d.keyword)}` : '';
       const api = d.api ? `　[${esc(d.api)}]` : '';
@@ -2194,16 +2199,25 @@ function renderSendProgress(task) {
     $('send-log').hidden = false;
     $('send-log').innerHTML = '';
     const results = st.results || [];
+    const ok = results.filter((x) => x.status === 'ok').length;
+    const skip = results.filter((x) => x.status === 'skip').length;
+    const failed = results.filter((x) => x.status === 'fail');
+    // 2026-10-08 用户定稿：成功的只报份数（不逐条列）；跳过和失败都要逐条解释原因——
+    // 跳过不是出错，是主动省额度（HR 14 天内联系过 / 岗位之前聊过），要让人看清原因。
+    if (ok) {
+      const okLine = document.createElement('div');
+      okLine.className = 'ok';
+      okLine.textContent = `已投 ${ok} 个`;
+      $('send-log').appendChild(okLine);
+    }
     for (const r of results) {
+      if (r.status === 'ok') continue;
       const line = document.createElement('div');
       line.className = r.status;
       line.textContent = `${SEND_STATUS[r.status] || r.status}　${r.jobName}（${r.company}）`
         + (r.reason ? `　${r.reason}` : '');
       $('send-log').appendChild(line);
     }
-    const ok = results.filter((x) => x.status === 'ok').length;
-    const skip = results.filter((x) => x.status === 'skip').length;
-    const failed = results.filter((x) => x.status === 'fail');
     $('send-phase').textContent = '投递完成';
     $('send-detail').textContent =
       `成功 ${ok} 个，跳过 ${skip} 个，失败 ${failed.length} 个`
