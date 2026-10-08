@@ -12,6 +12,185 @@ const Collector = {
   reset() { this.aborted = false; },
 
   /**
+   * 精投布置（2026-10-08 用户定）：在公司招聘职位页上点四个筛选下拉——
+   * 工作城市 / 工作经验 / 学历要求 / 薪资待遇（参考海投布置，真人点击）。
+   *
+   * 每家公司的可选项数量都不一样（用户定的规则）：
+   *   - 插件里只选了【一个】选项、且公司页下拉里【有】这一项 → 直接点它（服务端筛）
+   *   - 选了多个，或页面上没有这一项 → 跳选「全部 / 不限 / 全国」，
+   *     返回 fallback:true，由 SW 在插件本地过滤（卡片标签在 collectOneDomPage 里抓）
+   *
+   * wanted: { city:[城市名...], experience:[label...], degree:[label...], salary:[label...] }
+   * 返回 { ok, results: { city:{applied}|{fallback}|{skipped}, experience:..., ... } }
+   */
+  async applyCompanyFilters(wanted = {}) {
+    const DIMS = [
+      { key: 'city', label: '工作城市', allText: ['全部', '不限', '全国'] },
+      { key: 'experience', label: '工作经验', allText: ['全部', '不限'] },
+      { key: 'degree', label: '学历要求', allText: ['全部', '不限'] },
+      { key: 'salary', label: '薪资待遇', allText: ['全部', '不限'] },
+    ];
+    // 规范化：去空白、去括号计数（如「北京(12)」「全部(806)」）、去「经验/学历」后缀
+    const norm = (s) => String(s || '').replace(/[（(][^)）]*[)）]/g, '').replace(/\s+/g, '').replace(/经验|学历/g, '');
+    const fam = (s) => (/应届|在校|实习/.test(s) ? 'xiao' : s);   // 在校/应届/实习 在公司页常合成一个选项
+    const optMatch = (optText, wantLabel) => {
+      const a = norm(optText), b = norm(wantLabel);
+      if (!a || !b) return false;
+      if (a === b || a.includes(b) || b.includes(a)) return true;
+      return fam(a) === 'xiao' && fam(b) === 'xiao';
+    };
+    const visible = (el) => el && el.offsetHeight > 0;
+    const textOf = (el) => (el.textContent || '').trim();
+    // 真人级点击（2026-10-08 定案：BOSS 的下拉开/关和选项选中监听的是 mousedown 系事件，
+    // 合成 click() 开不了面板——用户实跑证实布置时面板从未打开，旧代码读的「选项」其实
+    // 是一直可见的「职位类型」行）。这里按真人点鼠标的完整序列派发，打在元素中心坐标
+    // 【实际命中】的最上层元素上（elementFromPoint），事件冒泡到谁算谁，跟真点一样。
+    const realClick = (el) => {
+      if (!el) return;
+      try { el.scrollIntoView({ block: 'nearest' }); } catch (e) {}
+      const r = el.getBoundingClientRect();
+      const x = r.left + r.width / 2, y = r.top + r.height / 2;
+      const target = document.elementFromPoint(x, y) || el;
+      const opts = { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y, button: 0, buttons: 1 };
+      for (const type of ['pointerover', 'mouseover', 'pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+        const Ev = (typeof PointerEvent !== 'undefined' && type.startsWith('pointer')) ? PointerEvent : MouseEvent;
+        try { target.dispatchEvent(new Ev(type, opts)); } catch (e) {}
+      }
+    };
+    // 维度钮名匹配用【轻】规范化：只去空白/括号计数/箭头字符，【不】去「经验/学历」字样——
+    // 上面的 norm 是为选项文本设计的（「3-5年经验」≈「3-5年」），拿来对维度名会把
+    // 「工作经验」删成「工作」，必坏（2026-10-08 第一坑）。箭头字符（▼⌄ 等）在部分页面
+    // 是文本节点，不去掉会让全等匹配落空（第二坑的另一半）。
+    const lightNorm = (s) => String(s || '').replace(/[（(][^)）]*[)）]/g, '')
+      .replace(/[\s　]+/g, '').replace(/[▼▾▽∨⌄︾﹀ˇˍ▲▴]/g, '');
+    // 找维度钮：可见、轻规范化后与维度名全等（短尾巴变体前缀兜底）、尽量小
+    const findOpener = (dimLabel) => {
+      const els = [...document.querySelectorAll('div,span,a,li,button')].filter(visible);
+      const cands = els.filter((el) => {
+        const t = lightNorm(textOf(el));
+        return t === dimLabel || (t.startsWith(dimLabel) && t.length <= dimLabel.length + 3);
+      });
+      cands.sort((a, b) => lightNorm(textOf(a)).length - lightNorm(textOf(b)).length || a.childElementCount - b.childElementCount);
+      return cands[0] || null;
+    };
+    // 各维度选项面板的「签名」：一组文本里有多少个长得像这个维度的选项。
+    // 字节实锤（2026-10-08 截图）：城市面板=全部/北京/杭州/深圳/上海…，薪资面板=不限/3K以下/3-5K/…/50K以上。
+    const DIM_SIG = {
+      city: /^(全部|全国|不限|北京|上海|广州|深圳|杭州|成都|西安|重庆|南京|武汉|苏州|天津|长沙|郑州|青岛|沈阳|宁波|东莞|无锡|佛山|合肥|大连|福州|厦门|哈尔滨|济南|温州|南宁|长春|泉州|石家庄|贵阳|常州|南通|嘉兴|太原|徐州|南昌|金华|珠海|惠州|中山|台州|烟台|兰州|绍兴|海口|扬州|洛阳|汕头|湖州|盐城|潍坊|保定|镇江|唐山)$/,
+      experience: /^(全部|不限|应届|在校|实习|\d+年以内|\d+-\d+年|\d+年以上|\d+年以下)$/,
+      degree: /^(全部|不限|初中及以下|中专\/中技|高中|大专|本科|硕士|博士)$/,
+      salary: /^(全部|不限|\d+K以下|\d+-\d+K|\d+K以上)$/,
+    };
+    // 点开下拉后【定位真正的选项面板再真点】（2026-10-08 第三坑，用户拍的「真的去点击」）：
+    // 弹层常挂在 body（portal），不在钮的祖先链里；而钮附近还躺着「职位类型」行这种
+    // 假面板（也有「全部」，但其余选项是技术/销售…）。新法：找钮附近所有「全部/不限」锚点，
+    // 各取兄弟群用维度签名打分，只认得分最高且达标的那一组——不像本维度的一概不碰。
+    const findPanel = (dim, opener, wants) => {
+      const sig = DIM_SIG[dim.key];
+      const oRect = opener.getBoundingClientRect();
+      const anchors = [...document.querySelectorAll('li, a, div, span')]
+        .filter((el) => visible(el) && el.childElementCount === 0 && dim.allText.includes(norm(textOf(el))))
+        .filter((el) => {
+          const r = el.getBoundingClientRect();
+          return r.top >= oRect.top - 420 && r.top <= oRect.bottom + 420;   // 面板开在钮的上/下方
+        });
+      let best = null;
+      for (const a of anchors) {
+        const box = a.parentElement;
+        if (!box) continue;
+        let items = [...box.children].filter((el) => visible(el) && el.childElementCount === 0 && norm(textOf(el)));
+        if (items.length < 2) {
+          items = [...box.querySelectorAll('*')].filter((el) => visible(el) && el.childElementCount === 0
+            && norm(textOf(el)) && norm(textOf(el)).length <= 12);
+        }
+        const texts = items.map((el) => norm(textOf(el)));
+        let score = texts.filter((t) => sig.test(t)).length;
+        if (wants.some((w) => texts.some((t) => optMatch(t, w)))) score += 2;   // 含想要项的面板加分
+        if (!best || score > best.score) best = { items, texts, score };
+      }
+      return best && best.score >= 2 ? best : null;
+    };
+    // 失败时的结构速写：钮的标签/类名 + 逐层祖先里可见 li/a 数，写进 diag 排查 DOM 用
+    const domSketch = (opener) => {
+      const cls = (el) => el.tagName.toLowerCase() + (el.className && typeof el.className === 'string'
+        ? '.' + el.className.trim().split(/\s+/).slice(0, 2).join('.') : '');
+      const parts = [cls(opener)];
+      let box = opener;
+      for (let i = 0; i < 6 && box; i++) {
+        box = box.parentElement;
+        if (!box) break;
+        parts.push(cls(box) + ':' + [...box.querySelectorAll('li, a')].filter(visible).length);
+      }
+      return parts.join('<');
+    };
+    // 钮都找不到时的提示：页面上可见的疑似筛选钮文本（前 8 个），看真实 DOM 叫什么名
+    const chipsHint = () => {
+      const hits = [...document.querySelectorAll('div,span,a,li,button')]
+        .filter((el) => visible(el) && /城市|经验|学历|薪资/.test(textOf(el))
+          && textOf(el).length <= 12 && el.childElementCount <= 3)
+        .slice(0, 8).map((el) => el.tagName.toLowerCase() + ':' + lightNorm(textOf(el)));
+      return hits.join(',') || 'none';
+    };
+
+    const results = {};
+    // 布置冷却（用户 2026-10-08 定）：每个动作 0.5~1.5 秒随机（COMPANY_LAYOUT_*；
+    // 海投布置另走 HAITOU_LAYOUT_* 1~2 秒不变），点开下拉/点选项/点回全部统一用它
+    const dimGap = () => U.randInt(CONFIG.COMPANY_LAYOUT_MIN_MS || 500, CONFIG.COMPANY_LAYOUT_MAX_MS || 1500);
+
+    for (const dim of DIMS) {
+      const wants = (wanted[dim.key] || []).filter(Boolean);
+      if (!wants.length) { results[dim.key] = { skipped: 'no_selection' }; continue; }
+      await U.sleep(dimGap());
+      let opener = findOpener(dim.label);
+      if (!opener) {
+        // 公司页是 SPA，筛选栏可能比职位列表渲染晚：稍等再找一次，还找不到才认 fallback
+        await U.sleep(dimGap());
+        opener = findOpener(dim.label);
+      }
+      if (!opener) { results[dim.key] = { fallback: true, reason: 'dim_not_found', debug: chipsHint() }; continue; }
+      realClick(opener);   // 真人序列点开下拉（mousedown 系才有效）
+      await U.sleep(dimGap());
+      let panel = findPanel(dim, opener, wants);
+      if (!panel) {   // 面板动画/渲染慢：再等一拍复看一次，还没有才认失败
+        await U.sleep(dimGap());
+        panel = findPanel(dim, opener, wants);
+      }
+      if (!panel) {
+        // 没认出任何像本维度的面板：把可能展开的东西点回去，如实记 options_not_found + 取证
+        realClick(opener);
+        await U.sleep(dimGap());
+        results[dim.key] = { fallback: true, reason: 'options_not_found', debug: domSketch(opener) + '|疑似:' + chipsHint() };
+        continue;
+      }
+      let target = null;
+      if (wants.length === 1) {
+        target = panel.items.find((el) => optMatch(textOf(el), wants[0]) && !dim.allText.includes(norm(textOf(el)))) || null;
+      }
+      if (target) {
+        // 真的去点：点中面板里想要的那一项
+        const label = textOf(target);
+        realClick(target);
+        await U.sleep(dimGap());   // 等列表按新筛选重渲染
+        results[dim.key] = { applied: label };
+        continue;
+      }
+      // 面板是真的但没有想要项：跳选「全部/不限/全国」，交本地过滤（取证：当时读到了什么）
+      const seen = '读到:' + panel.texts.slice(0, 8).join('/');
+      const allOpt = panel.items.find((el) => dim.allText.includes(norm(textOf(el))));
+      if (allOpt) {
+        realClick(allOpt);
+        await U.sleep(dimGap());
+        results[dim.key] = { fallback: true, reason: wants.length > 1 ? 'multi_selection' : 'option_not_found', debug: seen };
+      } else {
+        realClick(opener);   // 没找到「全部」，把下拉点回去，别把页面晾在展开态
+        await U.sleep(dimGap());
+        results[dim.key] = { fallback: true, reason: 'no_all_option', debug: seen };
+      }
+    }
+    return { ok: true, results };
+  },
+
+  /**
    * 驱动公司主页的「查找职位中包含的关键词」框搜索（= 人在公司页里搜）。
    * 往 .search-job-input 填关键词、点 .job-search-btn，页面自己会发出【公司内部
    * 搜索】请求，嗅探器据此抓到正确的、锁定本公司的模板，再交给 collectPages 复放。
@@ -67,45 +246,107 @@ const Collector = {
   },
 
   /**
-   * 从搜索结果页的 DOM 里读公司 brandId：扫所有 /gongsi/{brandId}.html 链接，投票取最多的。
-   * 搜「公司名」时首屏结果基本都是这家公司，占多数的那个 brandId 就是它。
-   * 走 DOM 不走签名接口，所以后台标签也能用、能并行。
+   * 精投真人链路第 3 步（用户 2026-10-08 定）：在「搜公司名」的结果页上，
+   * 点卡片左下角公司名最贴合的那张卡进公司页。
+   * - 候选按匹配排：公司名与目标名（含搜寻名/别名）互含的卡按页序排前；
+   *   attempt = 点第几个候选（0 起，供核对不吻合后回来试点优的卡）。
+   * - 点击前把链接的 target 去掉，保证同分页内跳转（用户定：一个单元
+   *   从头到尾只用一个分页，开一次关一次）。
+   * - SPA 渲染有快有慢：页内轮询等卡片出现（最多 ~16 秒）。
    */
-  readBrandFromSearchDom(names) {
-    const bidOf = (href) => { const m = (href || '').match(/gongsi\/(?:job\/)?([^.?\/]+)\.html/); return (m && m[1]) || null; };
+  async clickCompanyCard({ names, attempt } = {}) {
     const want = (names || []).map((s) => String(s || '').toLowerCase()).filter(Boolean);
     const cardSels = ['.job-card-wrapper', 'li.job-card-wrapper', '.job-card-box', 'ul.job-list-box > li', '.search-job-result li', '[class*="job-card"]'];
-    let cards = [];
-    for (const sel of cardSels) { cards = document.querySelectorAll(sel); if (cards.length) break; }
-    const nameOf = (c) => {
-      const n = c.querySelector('.company-name, [class*="company-name"], .company-info .name, .name');
-      return String((n ? n.textContent : c.textContent) || '').toLowerCase();
+    const findCards = () => {
+      let cards = [];
+      for (const sel of cardSels) { cards = document.querySelectorAll(sel); if (cards.length) break; }
+      return [...cards].map((c) => ({
+        card: c,
+        name: String((c.querySelector('.company-name, [class*="company-name"], .company-info .name, .name') || c).textContent || '').trim(),
+        a: c.querySelector('a[href*="/gongsi/"]'),
+      })).filter((x) => x.a && x.name);
     };
-    // 1. 【按公司名匹配】：取第一张「公司名含搜索词」的卡的公司链接。
-    //    排除底部「推荐的别家公司」（名字不含搜索词），小公司也能精准进自己的页面。
-    if (want.length) {
-      for (const c of cards) {
-        if (!want.some((w) => nameOf(c).includes(w))) continue;
-        const a = c.querySelector('a[href*="/gongsi/"]');
-        const bid = a && bidOf(a.getAttribute('href'));
-        if (bid) return { ok: true, brandId: bid, from: 'name-match' };
-      }
+    let cards = [];
+    for (let i = 0; i < 20 && !cards.length; i++) {
+      if (i) await U.sleep(800);
+      cards = findCards();
     }
-    // 2. 退：第一张有公司链接的卡
-    for (const c of cards) {
-      const a = c.querySelector('a[href*="/gongsi/"]');
-      const bid = a && bidOf(a.getAttribute('href'));
-      if (bid) return { ok: true, brandId: bid, from: 'first-card' };
+    if (!cards.length) return { ok: false, reason: 'no_cards' };
+    const matched = want.length
+      ? cards.filter((x) => want.some((w) => { const n = x.name.toLowerCase(); return n.includes(w) || w.includes(n); }))
+      : cards;
+    if (!matched.length) return { ok: false, reason: 'no_match_card' };
+    const pick = matched[Math.max(0, attempt || 0)];
+    if (!pick) return { ok: false, reason: 'no_more_candidate' };
+    pick.a.removeAttribute('target');   // 不弹新分页：全程留在本分页
+    pick.a.click();
+    return { ok: true, cardName: pick.name, href: pick.a.getAttribute('href') || '' };
+  },
+
+  /**
+   * 精投真人链路第 4 步（核对）：读公司简介页页头公司名，SW 拿它和目标名比对。
+   * 没到 /gongsi/ 页如实报 not_company_page（SW 轮询到 ok 为止）。
+   * 优先 h1/公司名节点；没有再退 document.title（剥掉「招聘/BOSS直聘」尾巴）。
+   */
+  readCompanyHeader() {
+    if (!/\/gongsi\//.test(location.pathname)) return { ok: false, reason: 'not_company_page' };
+    const el = document.querySelector('h1, .company-name, [class*="company-name"]');
+    let name = String((el && el.textContent) || '').trim().slice(0, 40);
+    if (!name) {
+      name = String(document.title || '')
+        .replace(/[-_|]\s*BOSS直聘.*$/, '').replace(/招聘.*$/, '').trim().slice(0, 40);
     }
-    // 3. 兜底：全页 /gongsi/ 链接投票取最多
-    const votes = new Map();
-    for (const a of document.querySelectorAll('a[href*="/gongsi/"]')) {
-      const bid = bidOf(a.getAttribute('href'));
-      if (bid) votes.set(bid, (votes.get(bid) || 0) + 1);
+    if (!name) return { ok: false, reason: 'no_name' };
+    return { ok: true, name, title: String(document.title || '').slice(0, 60) };
+  },
+
+  /**
+   * 精投真人链路第 4 步（进职位列表）：点公司页的「招聘职位」tab。
+   * 找可见、文案为「招聘职位」（可带数量后缀）的最内层元素，点它或它所在的 <a>；
+   * 同样去掉 target 保证同分页内跳转。找不到如实报，不乱点。
+   */
+  clickCompanyJobsTab() {
+    // tab 文案会带在招计数：字节实锤「招聘职位(10000)」（2026-10-08 截图）——剥掉
+    // 括号计数/裸数字/空白再比对，否则大公司永远找不到入口（旧 ≤10 字全等被实锤）。
+    const strip = (s) => String(s || '').replace(/[（(][^)）]*[)）]/g, '').replace(/\d+\+?/g, '').replace(/[\s　]/g, '');
+    const els = [...document.querySelectorAll('a, span, div, li')]
+      .filter((el) => el.offsetHeight > 0)
+      .map((el) => ({ el, t: (el.textContent || '').trim(), s: strip(el.textContent) }))
+      .filter((x) => x.s === '招聘职位' && x.t.length <= 16);
+    if (!els.length) {
+      // 取证：页面上疑似 tab 的可见短文本，写进 diag 看真实 DOM 叫什么
+      const hints = [...document.querySelectorAll('a, span, div, li')]
+        .filter((el) => el.offsetHeight > 0 && el.childElementCount <= 2)
+        .map((el) => (el.textContent || '').trim())
+        .filter((t) => t && t.length <= 14 && /职位|简介|公司/.test(t))
+        .slice(0, 8);
+      return { ok: false, reason: 'no_jobs_tab', hint: hints.join(',') || 'none' };
     }
-    if (!votes.size) return { ok: true, brandId: null };
-    const top = [...votes.entries()].sort((a, b) => b[1] - a[1])[0];
-    return { ok: true, brandId: top[0], from: 'vote' };
+    els.sort((a, b) => a.t.length - b.t.length || a.el.childElementCount - b.el.childElementCount);   // 文案最短 = 最内层
+    const target = els[0].el.closest('a') || els[0].el;
+    if (target.removeAttribute) target.removeAttribute('target');
+    target.click();
+    return { ok: true, text: els[0].t };
+  },
+
+  /** 职位列表页是否就绪：页内「查找职位」搜索框出现（SW 点完招聘职位 tab 后轮询用） */
+  companyJobsReady() {
+    const box = document.querySelector('.search-job-input input, input[placeholder*="查找职位"]');
+    return { ok: true, ready: !!box, url: location.href };
+  },
+
+  /**
+   * 先搜词再布置的配套（用户 2026-10-08 定）：布置点下拉可能把搜索框清空。
+   * 没清 → 什么都不做（kept）；清了 → 补填重搜一次（refilled）。
+   */
+  async companyBoxEnsure(keyword) {
+    const kw = String(keyword || '').trim();
+    if (!kw) return { ok: true, kept: true };
+    const input = document.querySelector('.search-job-input input, input[placeholder*="查找职位"]');
+    if (!input) return { ok: false, reason: 'no_box' };
+    if ((input.value || '').includes(kw)) return { ok: true, kept: true };
+    const r = await this.driveCompanyBoxSearch(kw);
+    return { ok: !!r.ok, refilled: true };
   },
 
   /** 读嗅探器记录的最近 /wapi/ 请求 URL（调试用）*/
@@ -395,18 +636,38 @@ const Collector = {
       await U.sleep(500);   // 等本页渲染
     }
 
+    // 卡片上的「1-3年 / 本科」标签行：类名靠不住，逐行扫 innerText 用正则认
+    // （行宽 ≤12 字防误吃岗位名；薪资行带 K 不带「年」，不会被经验正则误中）。
+    // 这两个标签是精投本地过滤（经验/学历）的依据——布置点不上的维度靠它筛。
+    const EXP_TAG_RE = /(经验不限|无经验|在校\/应届|在校生|应届生|\d+年以内|\d+-\d+年|\d+年以上)/;
+    const DEG_TAG_RE = /(学历不限|初中及以下|中专\/中技|高中|大专|本科|硕士|博士)/;
+    const readTags = (el) => {
+      let exp = '', deg = '';
+      for (const ln of (el.innerText || '').split('\n')) {
+        const t = ln.trim();
+        if (!t || t.length > 12) continue;
+        if (!exp) { const m = t.match(EXP_TAG_RE); if (m) exp = m[1]; }
+        if (!deg) { const m = t.match(DEG_TAG_RE); if (m) deg = m[1]; }
+        if (exp && deg) break;
+      }
+      return { exp, deg };
+    };
+
     const jobs = [];
     for (const c of readCards()) {
       const link = c.querySelector('a[href*="job_detail"]')?.getAttribute('href')
         || (/job_detail/.test(c.innerHTML) ? (c.querySelector('a')?.getAttribute('href') || '') : '');
       const jobId = (String(link).match(/job_detail\/([^.?]+)/) || [])[1] || '';
       if (!jobId) continue;
+      const tags = readTags(c);
       jobs.push(this.normalizeJob({
         encryptJobId: jobId,
         jobName: pick(c, ['.job-name', '.job-title .job-name', '[class*="job-name"]', '.name']),
         salaryDesc: pickSalary(c),
         brandName: pick(c, ['.company-name', '[class*="company-name"]', '.company-info .name']),
         cityName: pick(c, ['.job-area', '.job-area-wrapper', '[class*="job-area"]', '[class*="city"]']),
+        jobExperience: tags.exp,
+        jobDegree: tags.deg,
       }));
     }
     return { ok: true, jobs, hasNext: !!findNext(), turned };

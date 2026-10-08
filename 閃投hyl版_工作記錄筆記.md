@@ -260,3 +260,192 @@ AI 提出了「看門狗要真停得住，卡住的步驟必須自己有超時�
 AI 提出了「把 10-07~08 全部未推送改动整体提交并推送到共用仓库 main 分支（huangyaling658-creator/shantou-boss）」的修改方向 ;
 AI 提出了「沿用上一次推送的 git 身份（edwardlsf <edwardlsf@users.noreply.github.com>，从 commit 5341004 的作者信息取），本仓库 local 配置」的修改方法 ;
 修改的内容：git add -A 后整体提交 ccab1e3「闪投 2026-10-07~08：布置链路定稿 + 城市区域联动 + 恢复搜索 + 上线需求 P0 补齐」（13 个文件，+931/-250，含本笔记），git push origin main 成功（5341004..ccab1e3）；本仓库 local 配置了 user.name/user.email（沿用 5341004 的作者身份）；如实备注：secrets.js 的 QWEN_KEY 仍为空字符串，仓库不含真实密钥 ;
+---
+時間 2026-10-08 12:43:28 ;
+用戶 提出了「生成打招呼語的過程中『重置』按鈕改為停止，作用也是用來停生成」（截圖：生成中 0/1… 時左邊按鈕仍顯示「重置」）的要求 ;
+AI 提出了「生成中把底部次按鈕切換為『停止』，點了走新增的 stopGreeting()；與搜索停止 stopSearch() 靠 S.greeting 標記分流，互不串擾」的修改方向 ;
+AI 提出了「停止=發 STOP_TASK（doGreeting 的 worker 循環本來就查 stopRequested，卡住的步驟有各自超時兜底）+樂觀復位界面；已生成的本來就實時填進卡片、停了不丟；自定義模式的『生成完直接投遞』連鎖（pendingSendAfterGreet）一併取消；遲到的 aborted/greeting_done 廣播經核實只做同向復位，不會把已停狀態翻回去」的修改方法 ;
+修改的内容：修改 src/panel/panel.js（runGreeting 起步設 S.greeting=true 並把 btn-reset 改「停止」、catch 裡復位；btn-reset 點擊處理按 S.greeting 分流 stopGreeting/stopSearch；新增 stopGreeting()：發停止令、清 generating 沙漏態、空格子 placeholder 改「（已停止，可再點生成）」、取消 pendingSendAfterGreet、按鈕復位；onGreetingDone 與 greeting_error 處理裡補 S.greeting=false 與按鈕復位）；修改 docs/DEVELOPMENT.md（§2 補「生成中重置變停止」條目）；panel.js 通過 node --check；未實跑（需重載擴展驗證：生成中點停止→生成停下、已生成保留、空格子可再點接著生成）;
+---
+時間 2026-10-08 14:21:54 ;
+用戶 提出了「OCR 放在搜之後做」（背景：生成被「还没有简历内容」攔下——圖片是 key 未填時傳的，OCR 失敗後文字一直空著；用戶指出按次任務自愈、不能要求用戶重傳，舊用戶升級也一樣會踩）的要求 ;
+AI 提出了「自愈式按需識別：上傳只存圖+清舊文字（防舊簡歷文字冒充新簡歷），識別挪到真正要用文字的環節（生成/再生成/推薦崗位詞）自動做；文字已有直接用、識別失敗不緩存失敗狀態下次自動再試，任何狀態不死鎖」的修改方向 ;
+AI 提出了「SW 新增 ensureResumeText()；doGreeting 的識別放在看門狗啟動之前（識別最長 60 秒不能被 30 秒看門狗誤殺）；已核實搜索鏈路不用簡歷文字（scoreJob 已定義未接線）、面板 loadRecommendedPositions 有『有文字才調』守衛不會在開面板時偷偷觸發識別」的修改方法 ;
+修改的内容：修改 src/background/service-worker.js（新增 ensureResumeText()；SAVE_RESUME_IMAGES 只存圖+一律清 RESUME_TEXT 不再在上傳時 OCR；doGreeting 入口改走 ensureResumeText（僅 AI 模式，在看門狗之前）；UPDATE_GREETING regenerate 改走 ensureResumeText；SUGGEST_POSITIONS 改走 ensureResumeText（第一次點推薦會先讀簡歷，最多等 1 分鐘））；修改 src/panel/panel.js（saveResume 不再顯示「正在讀简历…」、上傳成功顯示「已保存 N 张，生成时自动读取文字」、不再觸發 loadRecommendedPositions；面板載入時無文字的狀態行改「已保存图片，生成时自动读取」；空圖時顯示「未上传简历」）；修改 docs/DEVELOPMENT.md（§2 補「簡歷 OCR 放在搜索之後做」條目）；2 個 JS 文件通過 node --check；未實跑（需重載擴展驗證：重傳圖→立即能繼續操作→點生成時先自動識別再出招呼語；識別失敗時 toast 帶真實原因、下次點生成自動再試）;
+---
+時間 2026-10-08 14:30:38 ;
+用戶 提出了「OCR 或者可以和搜同時做，時間可以重疊」的要求（在上一條「OCR 放在搜之後做」基礎上再進一步） ;
+AI 提出了「搜索一開始（runRecall 入口）就後台預熱識別：不 await、不阻塞搜索、失敗靜默（生成時 ensureResumeText 會再試）；搜索要跑幾分鐘、識別最多 60 秒，等用戶點生成時文字早備好」的修改方向 ;
+AI 提出了「ensureResumeText 加併發去重（_p 掛起的 Promise 復用）：搜索預熱與用戶點生成同時觸發只跑一次識別；失敗後清掉掛起 Promise，下次調用自動重試」的修改方法 ;
+修改的内容：修改 src/background/service-worker.js（ensureResumeText 加併發去重與失敗重試清理；runRecall 入口（清停止標誌之後）加後台預熱調用 ensureResumeText().catch(() => {})，RESUME_RECALL 走同一個 runRecall 故恢復搜索也覆蓋）；修改 docs/DEVELOPMENT.md（§2 該條目補「OCR 與搜索同時做（時間重疊）」與併發去重說明）；service-worker.js 通過 node --check；未實跑（需重載擴展驗證：開始搜索→稍後點生成時不需要再等識別（文字已備好）；搜索中點生成不會觸發第二次識別）;
+---
+時間 2026-10-08 14:40:55 ;
+用戶 提出了「不要這樣（截圖：底部出現『恢复搜索（接着上次停止处·已完成0个单元）』按鈕）。檢查用戶的選擇有沒有更變，沒有更變那搜索的邏輯就是恢復搜索，如果有更變就是重新搜索。而且不用讓用戶知道」的要求 ;
+AI 提出了「恢復搜索靜默化：面板上不設任何恢復入口，『開始搜索』是唯一入口；後台在 START_RECALL 時比對用戶當前選擇與斷點條件快照——一致自動接著上次停止處跑（跳過已完成單元、預算重新一輪），不一致清斷點全新跑，用戶全程無感」的修改方向 ;
+AI 提出了「用 stableStringify 規範化比對（對象鍵排序、數組按元素規範化串排序——同批城市/崗位詞換順序選中視為沒變更）；已核實面板發出的 config 全部字段由選擇決定、無時間戳類揮發字段」的修改方法 ;
+修改的内容：修改 src/background/service-worker.js（新增 stableStringify；START_RECALL 改 async：載斷點→條件一致則裝 _doneSoFar/_skipCompanies/_skipUnits 續跑、不一致則清斷點全新跑；刪除 RESUME_RECALL 與 GET_SEARCH_CHECKPOINT 兩個處理器）；修改 src/shared/constants.js（刪 RESUME_RECALL/GET_SEARCH_CHECKPOINT 兩個 MSG，留 CLEAR_SEARCH_CHECKPOINT 給重置用）；修改 src/panel/panel.html（刪 btn-resume-search 按鈕）；修改 src/panel/panel.js（刪 refreshResumeSearchBtn/resumeBtnReqSeq/按鈕點擊監聽及其三處調用/隱藏點，updateAction 頂部加靜默化註釋）；修改 docs/DEVELOPMENT.md（§3『恢复搜索』條目改寫為靜默化版本）；3 個 JS 文件通過 node --check；未實跑（需重載擴展驗證：停止後不改條件點開始搜索→直接續跑跳過已完成單元；改個城市再點→從頭全新跑；界面無恢復按鈕）;
+---
+時間 2026-10-08 15:07:51 ;
+用戶 提出了「優化精投：精投去到公司頁面後搜了職位後，其實也有得『佈置』（截圖：公司頁的 工作城市/工作經驗/學歷要求/薪資待遇 四個下拉 + 職位類型行），可以參考海投的佈置，但補充一點每一家公司的每一項選項的數量都不一樣，如果用在插件內的選項沒有在公司頁裡能選就自己跳選『全部』或『不限』，然後在我們插件裡面過濾」的要求 ;
+AI 提出了「公司頁四個下拉（工作城市/工作經驗/學歷要求/薪資待遇）按海投佈置的真人點擊方式做：插件單選且頁面上有這項→點它（服務端篩）；多選或頁面沒有→跳選『全部/不限/全國』→該維度在插件本地過濾。佈置放在崗位詞搜索【之前】（防點篩選清空搜索框；若搜詞清了篩選，本地過濾兜住）」的修改方向 ;
+AI 提出了「本地過濾需要卡片上的經驗/學歷標籤：collectOneDomPage 逐行掃 innerText 正則認（行寬≤12字防誤吃崗位名），填進 normalizeJob 本來就有的 experience/degree 字段；面板把選中的 code 翻成中文 label 隨 config 下發（filterLabels，SW 沒有 OPT 表）；本地匹配從寬——沒抓到標籤/寫『不限』/薪資面議一律保留，單維篩完歸零就放棄該維（方案B精神）」的修改方法 ;
+修改的内容：修改 src/shared/constants.js（MSG 新增 COMPANY_APPLY_FILTERS）；修改 src/content/collector.js（新增 applyCompanyFilters：按維度名找下拉→點開→收集選項→能點點、點不了跳全部，維度間 1~2 秒復用 HAITOU_LAYOUT 常量、點完停 0.5~1 秒；collectOneDomPage 補抓經驗/學歷標籤）；修改 src/content/content.js（新增 COMPANY_APPLY_FILTERS 路由）；修改 src/background/service-worker.js（onePass 在 ready() 後、崗位詞循環前調布置（45 秒超時）、結果經 fmtCompanyLayout 寫 diag；新增 matchExperience/matchDegree/matchSalary/_salRangeOfLabel/_normSel；runRecall 公司分支在城市過濾後加經驗/學歷/薪資本地過濾，cut 數記 funnel.localFilterCut）；修改 src/panel/panel.js（runSearch config 新增 filterLabels：salary/experience/degree 的選中 code→label）；修改 docs/DEVELOPMENT.md（§1.3a 公司頁佈置+本地過濾）；5 個 JS 文件通過 node --check；如實說明：職位類型行不佈置（面板無此篩選維度，靠崗位詞收窄）、求職類型公司頁無下拉不做；未實跑（需重載擴展驗證：進公司頁後四個下拉被點、點不上的維度走本地篩、diag 顯示佈置結果）;
+---
+時間 2026-10-08 15:11:41 ;
+用戶 提出了「精投裡這三個不用要了，海投不要動」（截圖：公司行業/公司規模/融資階段三個篩選區）的要求 ;
+AI 提出了「精投模式隱去公司行業/公司規模/融資階段三個篩選區（公司頁沒有這三個維度可佈置，精投鎖的是具體公司，這三維對它沒意義），海投照展不動」的修改方向 ;
+AI 提出了「renderFilters 按 S.searchMode 跳過三個 key；renderMode 切模式時補調 renderFilters() 重畫（之前切模式不重畫篩選區）；runSearch 發令時精投剝掉這三個 key，防海投時選過的殘留值混進精投的條件快照比對（恢復搜索判定）與後台配置」的修改方法 ;
+修改的内容：修改 src/panel/panel.js（renderFilters 循環加 company 模式跳過 industry/scale/stage；renderMode 加 renderFilters() 調用；runSearch 的 filters 在 company 模式下 delete industry/scale/stage）；修改 docs/DEVELOPMENT.md（§3 補「精投隐去行业/规模/融资」條目）；panel.js 通過 node --check；未實跑（需重載擴展驗證：切到精投三區消失、切回海投三區回來）;
+---
+時間 2026-10-08 15:14:18 ;
+用戶 提出了「精投的佈置只佈置這四項」（截圖：公司頁的 工作城市/工作經驗/學歷要求/薪資待遇 四個下拉）的要求 ;
+AI 核對後確認「佈置側（collector applyCompanyFilters 的 DIMS）本來就只有這四項，無需改」；順著「精投只留佈置得動的維度」的精神，把精投面板裡佈置不了也不本地篩的「工作區域/求職類型」兩區也隱去（行業/規模/融資上一輪已隱），精投有效篩選收斂為 工作城市（目標城市區承擔）/工作經驗/學歷要求/薪資待遇，海投不動 的修改方向 ;
+AI 提出了「沿用上一輪的跳過機制：renderFilters 的 company 跳過清單由 3 個 key 擴為 5 個（+businessDistrict/jobType）；runSearch 的 company 剝離清單同步擴為 5 個」的修改方法 ;
+修改的内容：修改 src/panel/panel.js（renderFilters 跳過清單與 runSearch 剝離清單各擴為 5 個 key）；修改 docs/DEVELOPMENT.md（§3 該條目改寫為「精投只布置四项」）；panel.js 通過 node --check；未實跑（需重載擴展驗證：精投篩選區只剩 薪資待遇/工作經驗/學歷要求 三區 + 上方的目標城市，海投全區照展）;
+---
+時間 2026-10-08 15:35:52 ;
+用戶 提出了「新開分頁數=用戶選的公司數x城市數x職位數。但每次只能同開8個分頁。總行為數平分新開分頁數」的要求（精投單元化） ;
+AI 提出了「精投單元從『公司×詞』改為『公司×城市×詞』：一個單元開一個分頁，佈置這一個城市（單城市服務端篩得動）+ 搜這一個詞；全國/沒選城市→只有一個不帶城市的單元；brandId 同一家只定位一次（brandCache 按公司名緩存，其餘單元直接用）；斷點單元鍵改『公司|城市|詞』，海投/精投統一走 _skipUnits」的修改方向 ;
+AI 提出了「並行池 P=min(PARALLEL_COMPANIES=8, 單元數)，一個分頁收完立刻拉下一個單元頂上；perUnitBudget=max(2, floor(總行為數/單元數))，每單元只數自己的 unitActions，花完份額這個分頁收工（diag 記錄），全局 turnGate 照舊管節奏（份額是上限不是配速）；舊的『行為數≤4 整家重做+預算+10』隨單元化取消；公司級匯總：remainBy 記每家剩餘單元數全部跑完才落終態、stats 跨單元累加、companySeen 一家多單元共用」的修改方法 ;
+修改的内容：修改 src/background/service-worker.js（augmentFromCompanyPages 重構：cityList/unitKeyOf/units 裝配、P 改按單元數、perUnitBudget 平分、brandCache/companySeenBy/remainBy/locatedBy、onePass(u) 單城市佈置+單詞搜索+單元預算閘、processUnit 取代 processCompany 取消重做、doneUnits 取代 doneCompanies；runRecall 斷點讀 _doneUnits；START_RECALL 海投/精投統一 _skipUnits；斷點註釋更新）；修改 src/panel/panel.js（estimateUnits 改 公司×城市×詞、EST 註釋同步）；修改 docs/DEVELOPMENT.md（§1.3 改單元化、§1.4 改並行池+預算平分）；2 個 JS 文件通過 node --check；未實跑（需重載擴展驗證：選 2 公司×2 城市×2 詞=8 單元是否同開 8 分頁各佈置一城搜一詞、單元行為份額用完即收工、恢復搜索按單元鍵跳過）;
+---
+時間 2026-10-08 15:41:10 ;
+用戶 提出了「如某任務完成且剩餘行為數，平分至仍在進行的任務中」的要求（承接上一條精投單元化：perUnitBudget 原是一次性算死的靜態份額，單元提前收工省下的份額直接作廢） ;
+AI 提出了「份額動態化：把份額從常量改掛到單元對象上（u.cap/u.actions），單元完成時把沒花完的份額（cap−actions）攢進 bonusPool，連同初始平分取整丟的零頭一起平分給還沒跑完的單元（正在跑的+還在排隊的），正在翻頁的單元下一輪 while 判斷立即按新份額走」的修改方向 ;
+AI 提出了「不變式保證總預算不超：所有單元 cap 之和 ≤ actionsBudget（回流只是把已完成單元沒花完的份額還給池子再分出去）；除不盡的零頭留在池裡等下一個單元收工再分；沒定位到的單元花 0 個行為、整份額回流（對沒定位到公司是大頭）；全局 turnGate 照舊只管節奏不管預算上限（上限由各單元 cap 保證）」的修改方法 ;
+修改的内容：修改 src/background/service-worker.js（perUnitBudget 定義處新增 bonusPool 與 u.cap/u.actions 初始化；onePass 的 unitActions/perUnitBudget 全部改讀 u.actions/u.cap、diag 記錄帶實時 cap；processUnit 收尾新增回流段：u._done 標記→leftover 入池→未完單元平分 floor(pool/N)、餘數留池、diag 記「份額回流」；processUnit 上方註釋同步改寫）；service-worker.js 通過 node --check；未實跑（需重載擴展驗證：某單元提前收工後 diag 出現「份額回流」、其餘單元能翻超過初始 perUnitBudget 的頁數、總行為數不超 actionsBudget）;
+---
+時間 2026-10-08 15:48:28 ;
+用戶 提出了「算了，取消恢復搜索這個事情吧，每次都重新搜索」的要求（背景：上一條截圖實測踩坑——搜索 0:00 秒完成、零結果，靜默恢復判定把單元全跳過了；用戶決定整個功能不要了） ;
+AI 提出了「整體拆除斷點機制：START_RECALL 不再載斷點/比對條件/裝 _skipUnits，每次點『開始搜索』都是全新一輪；斷點的存/讀/清三函數、stableStringify、海投與精投的 _skipUnits 跳過、doneUnits 收集與落盤、CLEAR_SEARCH_CHECKPOINT 消息與 sw:searchCheckpoint 存儲鍵全部移除」的修改方向 ;
+AI 提出了「拆除清單逐一核對：海投 runHaitouScroll 的 doneUnits/unitKey/_skipUnits 跳過、runRecall 收尾的斷點落盤塊（if stopRequested save else clear）、精投 augmentFromCompanyPages 的 doneUnits/_doneUnits/skipUnits/unitKeyOf、START_RECALL 的靜默比對段、CLEAR_SEARCH_CHECKPOINT 路由、panel fullReset 裡的清斷點調用、constants 的 MSG 與 STORE 兩鍵；『恢復投遞』（繼續發送）不在拆除範圍不受影響」的修改方法 ;
+修改的内容：修改 src/background/service-worker.js（START_RECALL 還原為純全新搜索並留取消說明註釋；刪 saveSearchCheckpoint/loadSearchCheckpoint/clearSearchCheckpoint/stableStringify 四函數；刪 runRecall 斷點落盤塊；runHaitouScroll 刪 doneUnits 與返回值中的 doneUnits、刪單元鍵跳過；augmentFromCompanyPages 刪 doneUnits/_doneUnits/skipUnits/unitKeyOf、單元裝配不再算 key；htResult 註釋同步）；修改 src/shared/constants.js（刪 CLEAR_SEARCH_CHECKPOINT 消息與 SEARCH_CHECKPOINT 存儲鍵）；修改 src/panel/panel.js（fullReset 刪 ask(CLEAR_SEARCH_CHECKPOINT)，三處過時註釋改寫為「已取消」）；修改 docs/DEVELOPMENT.md（§1.3 斷點條目改為已取消說明；§3 恢復搜索條目整條改寫為取消記錄）；3 個 JS 文件通過 node --check；如實說明：舊用戶本地可能殘留一個不再被讀寫的 sw:searchCheckpoint 存儲鍵，無害可留；未實跑（需重載擴展驗證：停止後再點開始搜索→從頭全新跑不再秒完成；正常搜索/停止/重置流程不受影響）;
+---
+時間 2026-10-08 15:58:05 ;
+用戶 提出了「怎麼沒佈置?」（截圖：公司頁四個下拉全是默認文字；用戶澄清已 reload 並實跑過一輪，排除恢復搜索跳單元的解釋）的要求 ;
+AI 定位到「content 側 applyCompanyFilters 的 findOpener 有一個確定 bug：匹配時只 norm 了元素文本、沒 norm 維度名——『工作經驗』被 norm 成『工作』去和『工作經驗』比永遠不相等、『學歷要求』被 norm 成『要求』同樣永遠找不到，經驗/學歷兩維的鈕從來沒找到過（fallback 不點擊，頁面零動靜）；城市/薪資的鈕找得到，但若沒選城市+沒選薪資，四維就全無動作，與截圖現象吻合」的根因 ;
+AI 提出了「findOpener 改兩輪匹配：原文全等優先（norm 短詞如『工作』可能撞別的元素），沒有再 norm 兩邊規範化兜底（吃『工作經驗(12)』這類變體）；維度鈕找不到時等 0.8~1.5 秒重找一次（公司頁 SPA 篩選欄可能渲染晚）再認 fallback；SW 側布置改為無條件發（沒選的維度 content 立刻返回 skipped 不點擊），diag 每單元必留一行布置結果、fallback 帶原因（dim_not_found/option_not_found/multi_selection/no_all_option）」的修改方法 ;
+修改的内容：修改 src/content/collector.js（findOpener 重寫為兩輪匹配：原文全等優先+norm 兜底；維度鈕找不到時 0.8~1.5 秒後重找一次）；修改 src/background/service-worker.js（onePass 布置段改為無條件發 COMPANY_APPLY_FILTERS，『正在布置』進度事件仍僅在有條件時報；fmtCompanyLayout fallback 帶 reason、無條件時顯示『無條件可布置(全國且經驗/學歷/薪資未選)』）；2 個 JS 文件通過 node --check；未實跑（需重載擴展驗證：選了城市+經驗/學歷/薪資任一項跑精投→公司頁四維下拉被點、diag 出現『城市✓… 經驗✓…』；沒選任何條件→diag 顯示『無條件可布置』）;
+---
+時間 2026-10-08 16:24:12 ;
+用戶 提出了「冷卻時間 佈置:0.500-1.500s 搜 3.000-4.000s」的要求（精投鏈路實跑後拍板：布置動作放快到 0.5~1.5 秒、搜的翻頁行為閘從 4~6 秒降到 3~4 秒） ;
+AI 提出了「布置：新常量 COMPANY_LAYOUT_MIN/MAX_MS=500/1500，公司頁四下拉的每個動作（維度間隔/點開下拉/點選項/點回全部/重找等待/SW 布置後停頓）統一 0.5~1.5 秒隨機，海投布置仍走 HAITOU_LAYOUT_* 1~2 秒不動；搜：精投全局行為閘 TURN_GATE 4000/6000→3000/4000（與海投一致）」的修改方向 ;
+AI 提出了「行為預算要跟著閘速走：ACTIONS_PER_MINUTE 12→17（均值 3.5 秒一個，5 分鐘≈85 個），否則預算會在時長窗口 70% 處提前耗盡；面板耗時預估的 COOLDOWN_MIN/MAX 4000/6000→3000/4000 同步對齊；collector 舊翻頁路徑的 PAGE_INTERVAL_*（老路徑兜底）與海投各閘不動」的修改方法 ;
+修改的内容：修改 src/shared/constants.js（TURN_GATE_MIN/MAX_MS 改 3000/4000、ACTIONS_PER_MINUTE 12→17、新增 COMPANY_LAYOUT_MIN/MAX_MS 500/1500、COOLDOWN_MIN/MAX_MS 改 3000/4000、註釋同步）；修改 src/content/collector.js（applyCompanyFilters 的 dimGap 改用 COMPANY_LAYOUT_*，函數內所有動作後的 sleep（400-800/500-1000/300-600/800-1500 各檔）統一改 dimGap 0.5~1.5 秒）；修改 src/background/service-worker.js（onePass 布置後停頓改用 COMPANY_LAYOUT_*；行為閘/預算相關 4 處過時註釋改寫）；修改 docs/DEVELOPMENT.md（§1.1 預算 12→17、§1.2 閘 4~6→3~4、§1.3a 布置節拍改寫、§2 刪一條過時的重複滾動條目）；4 個 JS 文件通過 node --check；未實跑（需重載擴展驗證：布置肉眼可見加快、翻頁間隔 3~4 秒、行為預算進度條按 ~17/分鐘推進）;
+---
+時間 2026-10-08 16:38:51 ;
+用戶 提出了「還是沒有佈置到」+「在這裡」（三張截圖：公司頁四下拉全默認、搜索框已填詞；字節跳動公司頁實景證明下拉鈕確實存在）的要求 ;
+AI 定位到「第二個 bug：collectOptions 在維度鈕祖先裡找不到選項時退『全頁面找可見 li/a』，會抓到『職位類型』行的『全部(806)』和導航鏈接——四維每次都把職位類型的『全部』當自己維度的全部去點，它本來就是選中態，頁面零變化，看起來像沒布置；另：鈕上的箭頭字符（▼/⌄ 等）若是文本節點，全等匹配也會落空」的根因 ;
+AI 提出了「三層修法：①鈕名匹配換【輕】規範化 lightNorm（只去空白/括號計數/箭頭字符，不動『經驗/學歷』字樣——全局 norm 是給選項文本用的，對維度名必壞）；②收集選項的全局兜底加【幾何鄰近】約束——只認鈕上下 300px 內的 li/a（彈層只會開在鈕附近，職位類型行/導航在鈕上方被排除）；③【可信性校驗】——收集到的選項必須含『全部/不限』或能匹配想要項才動它，不像就是下拉沒展開成功，點回鈕、如實記 options_not_found，絕不再亂點頁面元素；失敗時帶結構速寫 debug（鈕標籤/類名+逐層祖先可見 li/a 數；鈕都找不到時列頁面上疑似鈕的文本），SW 寫進 diag 供排查」的修改方法 ;
+修改的内容：修改 src/content/collector.js（applyCompanyFilters 重寫匹配段：新增 lightNorm/domSketch/chipsHint；findOpener 改用 lightNorm 全等+前綴兜底；collectOptions 祖先上溯 5→6 層、全局兜底改幾何鄰近約束；dim 循環加 plausible 校驗擋亂點；失敗結果帶 debug 字段）；修改 src/background/service-worker.js（onePass 布置段：lr 裡帶 debug 的維度追加 diag 行『布置結構[維度]:…』截 120 字）；2 個 JS 文件通過 node --check；未實跑（需重載擴展驗證：四維下拉真的被點開選中；若仍有 fallback，diag 的『布置結構』行直接給出真實 DOM 線索）;
+---
+時間 2026-10-08 17:08:58 ;
+用戶 提出了「列一下精投的鏈路，我想微重做」並給出五步真人鏈路截圖規格（①按任務數開分頁去首頁 https://www.zhipin.com/?ka=header-home-logo 同開8個其餘排隊 ②首頁搜索欄搜公司搜尋名 ③結果頁讀一排卡片、點卡片左下角公司名最貼合的進入 ④公司頁檢查頁頭公司名最吻合、點「招聘職位」tab、在職位列表搜索欄搜職位名並佈置四下拉 ⑤掃卡片翻頁收回答案）；補充拍板：「開關某個分頁理論上應該只有一次」（一個單元一個分頁從頭到尾）；AskUser 四點確認：先搜詞再布置（布置後檢查補填）、核對不吻合回結果頁試點次優卡最多3張、同公司每單元走全流程 ;
+AI 提出了「onePass 整體重寫為真人鏈路：開首頁分頁→DRIVE_HOME_SEARCH 搜公司名→COMPANY_CLICK_CARD 點卡（target 去掉保同分頁跳轉、頁內輪詢等卡片渲染~16秒、按公司名互含排序選候選）→READ_COMPANY_HEADER 輪詢核對頁頭（不吻合 goBack 回結果頁 attempt+1 最多3張）→COMPANY_CLICK_JOBS_TAB 點招聘職位→COMPANY_JOBS_READY 輪詢等職位列表就緒→先 COMPANY_BOX_SEARCH 搜詞→COMPANY_APPLY_FILTERS 布置→COMPANY_BOX_ENSURE 檢查補填→原翻頁掃卡循環不動；關鍵渲染步驟前 chrome.tabs.update 激活前台（後台標籤 SPA 列表會被節流，老代碼騰訊栽過的坑）」的修改方向 ;
+AI 提出了「拆除 brandId 老路：刪 resolveBrandId 函數、readBrandFromSearchDom+READ_BRAND_DOM 消息、brandCache 緩存、BRAND_CACHE 存儲鍵、PAGE.COMPANY_JOBS 直達 URL 構造器、targets 裡從已收崗位投票 brandId 的預取（用戶貼網址的 brandOverrides 保留：該單元直接開公司簡介頁，仍核對+點招聘職位）」的修改方法 ;
+修改的内容：修改 src/shared/constants.js（MSG 刪 READ_BRAND_DOM 增 COMPANY_CLICK_CARD/READ_COMPANY_HEADER/COMPANY_CLICK_JOBS_TAB/COMPANY_JOBS_READY/COMPANY_BOX_ENSURE 五鍵；STORE 刪 BRAND_CACHE；PAGE 刪 COMPANY_JOBS、COMPANY 註釋更新）；修改 src/content/collector.js（readBrandFromSearchDom 整塊換成 clickCompanyCard/readCompanyHeader/clickCompanyJobsTab/companyJobsReady/companyBoxEnsure 五個新動作）；修改 src/content/content.js（路由同步換新五個）；修改 src/background/service-worker.js（augmentFromCompanyPages 頭註釋重寫；刪 resolveBrandId；targets 簡化為 company/searchName/aliases/brandId(僅貼網址的有)；刪 brandCache；onePass 定位段整體重寫為真人鏈路+pollHeader 輪詢助手+front() 前台激活；搜詞提前到布置之前+布置後 COMPANY_BOX_ENSURE 補填；runRecall 過時註釋更新）；修改 src/panel/panel.js（手動加公司的註釋改為真人鏈路說法）；修改 docs/DEVELOPMENT.md（§1.3 整節重寫為五步真人鏈路、§1.3a 佈置時機改為搜詞後、§1.6 改網址說明更新）；5 個 JS 文件通過 node --check；未實跑（需重載擴展驗證：分頁從首頁走起、點卡進對門公司、頁頭核對、點招聘職位、先搜詞再布置、一個單元只開關一次分頁；如實記錄：點卡核對不吻合的 goBack 回結果頁在 bfcache/SPA 下能否恢復卡片待實測）;
+---
+時間 2026-10-08 17:23:52 ;
+用戶 提出了「沒定位到，要重做3次，並總剩餘行為數+10」的要求（截圖：字節跳動「沒定位到」、騰訊搜職位中；即恢復舊版「沒定位到重做」思路，但按新單元化架構實現：沒定位到的單元最多重做 3 次，每次重做總剩餘行為數 +10） ;
+AI 提出了「在 processUnit 加重做循環：onePass 回來 !r.located 且未被停止 → 最多重做 3 次（首次+3 次重做共 4 次嘗試），每次重做 actionsBudget += 10（總剩餘行為數 +10，進度%分母同步長大）且該單元 u.cap += 10（這份額外預算留給重做單元定位成功後自己多翻頁用），重做間隔 1~3 秒隨機（跟人重試一樣），diag 記『沒定位到，第N次重做（总预算+10）』；定位成功/已定位但提前收工的單元不重做（仍走份額回流）」的修改方向 ;
+AI 提出了「既有機制無縫兼容：onePass 的 finally 每次嘗試都 closeSlot 關分頁（重試開新分頁，符合『開關分頁各一次/每次嘗試』）；『沒定位到』終態只在 remainBy 歸零時落（重做期間面板仍顯示定位中）；cap 之和 ≤ actionsBudget 的不變式保持（兩邊同時 +10）；stop() 檢查在循環條件與 sleep 後各一道，用戶停止立即不重做」的修改方法 ;
+修改的内容：修改 src/background/service-worker.js（processUnit 主體改 let r = await onePass(u) + for retry 1..3 循環：actionsBudget+=10、u.cap+=10、diag/console 記錄、sleep(1000,3000)、stop 檢查後重跑 onePass；函數頭註釋改寫說明重做規則）；修改 docs/DEVELOPMENT.md（§1.4 新增『沒定位到的單元重做』條目，原『≤4 整家重做取消』條目補注定位成功的單元不重做）；service-worker.js 通過 node --check；未實跑（需重載擴展驗證：定位失敗的單元會連開新分頁重試最多 3 次、diag 出現重做行、面板行為進度分母 +10/次、成功後該單元能用上 +10 份額翻更多頁）;
+---
+時間 2026-10-08 17:34:57 ;
+用戶 提出了「佈置那邊要不就真的去點擊吧」+ 兩張字節公司頁實拍截圖（①工作城市下拉展開：全部/北京/杭州/深圳/上海/成都/廣州/西安/重慶/南京…純文字列表 ②薪資待遇下拉展開：不限/3K以下/3-5K/5-10K/10-20K/20-50K/50K以上；兩張圖都顯示 tab 文案是「招聘職位(10000)」——誤判入口找不到的實錘）的要求 ;
+AI 定位到「布置讀不到真面板：彈層掛 body（portal）不在鈕的祖先鏈裡，鈕附近又躺著職位類型行這種假面板（也有『全部』能過偽裝檢查，但沒有北京/20-50K → option_not_found 後還把職位類型的全部點一下）；招聘職位入口：舊條件『文字含招聘職位且 ≤10 字』被『招聘職位(10000)』實錘——大公司永遠找不到」的根因 ;
+AI 提出了「布置重寫為真的去點：findPanel 找鈕上下 420px 內所有『全部/不限』錨點，各取兄弟群（children 不夠退 leaf 後代）用維度簽名 DIM_SIG 打分（城市名表/經驗檔/學歷檔/薪資檔正則，含想要項 +2），只點得分最高且 ≥2 的一組——不像本維度的一概不碰；所有 fallback 帶取證（option_not_found/multi_selection/no_all_option 記『讀到:前8個選項文本』，options_not_found 記鈕結構速寫+疑似鈕文本），SW 照舊寫進 diag『布置結構[維度]』行；招聘職位 tab 改剝掉括號計數/裸數字/空白再全等比對（『招聘職位(10000)』→『招聘職位』），SW 改輪詢重試 ~10 秒（tab 欄比頁頭渲染慢），找不到把頁面疑似 tab 文本記進 diag」的修改方法 ;
+修改的内容：修改 src/content/collector.js（刪 collectOptions，新增 DIM_SIG 簽名表與 findPanel 面板定位打分；維度循環點選段重寫：opener.click→findPanel→真點想要項/點全部兜底/點回鈕，全 fallback 路徑帶 debug 取證；clickCompanyJobsTab 重寫：strip 剝計數後全等比對『招聘職位』、找不到回傳 hint 疑似 tab 文本）；修改 src/background/service-worker.js（點招聘職位 tab 改 10 次 ×1 秒輪詢重試，diag 帶 jt.hint）；修改 docs/DEVELOPMENT.md（§1.3a 新增選項面板定位條目、§1.3 第 4 步補 tab 計數剝離+輪詢說明）；2 個 JS 文件通過 node --check；未實跑（需重載擴展驗證：字節能進『招聘職位(10000)』→搜詞→城市/薪資真點上（diag 出現 城市✓北京 薪資✓20-50K）；若仍 fallback，diag 的『讀到:…』行直接給出當時讀到的選項）;
+---
+時間 2026-10-08 18:00:40 ;
+用戶 提供了關鍵證詞「那是我點的，你佈置時我沒有看到點開」——截圖裡展開的薪資面板是用戶手動點的，插件布置時面板從未打開過（此前「誤判好了但佈置還是不行」的最後一塊拼圖） ;
+AI 定案「合成 click() 開不了 BOSS 的下拉：BOSS 下拉開關和選項選中監聽的是 mousedown 系事件，element.click() 只派發 click 事件對它無效——所以布置時面板從未打開，舊代碼讀到的『選項』其實是一直可見的『職位類型』行（不是下拉，永遠在那兒），有假選項可讀、有假『全部』可點，整個布置鏈自始至終沒碰過真面板」的根因 ;
+AI 提出了「真人級點擊 realClick：完整事件序列 pointerover→mouseover→pointerdown→mousedown→pointerup→mouseup→click，打在元素中心座標 elementFromPoint 實際命中的最上層元素上（事件冒泡到誰算誰，跟真點一樣），點前 scrollIntoView(nearest) 防長面板裡的項滾出可視區；布置的五處點擊（開鈕/點回/點選項/點全部/復看）全換 realClick；面板沒認出時再等一拍復看一次才認失敗」的修改方法 ;
+修改的内容：修改 src/content/collector.js（applyCompanyFilters 新增 realClick 助手；維度循環五處 .click() 全換 realClick；findPanel 失敗加一次 dimGap 復看）；修改 docs/DEVELOPMENT.md（§1.3a 新增真人級點擊條目）；collector.js 通過 node --check；未實跑（需重載擴展驗證：布置時肉眼可見四個下拉真的彈開、點中後鈕變所選值高亮，diag 出現 城市✓北京 薪資✓20-50K）;
+---
+時間 2026-10-08 18:27:44 ;
+用戶 提出了「先改這兩個，這樣佈置就不用一個一個」的要求（批准上一輪方案：布置不再點下拉，改用用戶抓樣本反解的 URL 結構——城市=路徑前綴 /gongsi/job/c{城市碼}/{brandId}.html，薪資=參數 salary=402~407，query=崗位詞；先改城市+薪資兩維，經驗/學歷走本地過濾） ;
+AI 提出了「onePass 的布置段整體換成 URL 布置：搜完詞（box 搜索已帶 query 進 URL）→ chrome.tabs.get 讀當前 URL → new URL 插城市路徑前綴（碼取 config.cities/cityNames 平行數組的 codeOfCity）和 salary 參數（直接用 config.filters.salary 的碼——面板 OPT.salary 的 code 本來就是 402~407，與公司頁 URL 完全一致，不用 label 映射）→ tabs.update 導航 → 睡 0.8~1.5 秒等真導航 → waitForTabComplete → COMPANY_JOBS_READY 輪詢就緒 → 照舊掃卡翻頁」的修改方向 ;
+AI 提出了「配套取捨：薪資單選才帶參數、多選/無碼/未選不帶走本地過濾；經驗/學歷 URL 參數未驗證不猜，走本地過濾；query 兜底（URL 裡沒有就補上）；貼網址分支（brandOverrides）順帶修隱患——不再停留公司簡介頁，直接拼職位頁 URL（含 query/city/salary）一步到位；diag 記『布置:城市✈北京 薪資✈20-50K(406) 經驗→本地篩 學歷→本地篩』；下拉點擊版（applyCompanyFilters/findPanel/realClick/ENSURE）保留不刪不再調用（BOSS 改 URL 結構可切回），SW 側刪已無調用的 fmtCompanyLayout」的修改方法 ;
+修改的内容：修改 src/background/service-worker.js（cityList 旁新增 codeOfCity 平行數組映射；onePass『搜詞+布置』整段替換：搜詞僅正常分支（貼網址分支靠 URL query）、布置改為 URL 導航塊+urlBits diag、刪 COMPANY_APPLY_FILTERS/COMPANY_BOX_ENSURE 調用；刪 fmtCompanyLayout 函數與過時頭註釋）；修改 docs/DEVELOPMENT.md（§1.3a 整節改寫為『URL 結構直改+本地過濾』：URL 規律/流程/取捨/貼網址修復/點擊版留檔與排查結論存檔）；service-worker.js 通過 node --check；未實跑（需重載擴展驗證：佈置時分頁 URL 可見變成 /gongsi/job/c101010100/….html?salary=406&query=…、列表按城市+薪資收窄、diag 出現『城市✈… 薪資✈…』；全國+未選薪資時不導航直接掃）;
+---
+時間 2026-10-08 18:36:18 ;
+用戶 提出了「其他先改為選項可以選,但仍然無效」的要求（兩件事：①經驗/學歷兩維不等抓樣本了，先照城市/薪資的做法改為 URL 可選；②城市+薪資的 URL 布置實跑仍然無效） ;
+AI 核对后確認「面板 OPT.salary 的 code 確為 402~407、config.cities/cityNames 平行數組對齊、URL 拼接邏輯（路徑前綴替換+searchParams）代碼層面沒查到硬傷——『仍然無效』缺證據，先補取證」的判斷 ;
+AI 提出了「①經驗/學歷單選時帶 ?experience={码}/?degree={码} 進 URL：碼用面板 OPT 的 BOSS 碼（101~108/2xx），參數名按 BOSS 主站慣例猜的、未驗證，diag 標『(试验)』，本地過濾照舊兜底（BOSS 不認這參數也無害），多選走本地過濾；②導航後用 chrome.tabs.get 讀回真實 URL 寫進 diag『布置后URL:…』——URL 裡有 c碼/參數 = 導航成了（無效則是 BOSS 沒認參數），沒有 = 導航沒成（查『布置网址异常』行），一條診斷行分清兩種『無效』」的修改方法 ;
+修改的内容：修改 src/background/service-worker.js（URL 布置段：新增 expSel/expCode、degSel/degCode 單選取碼；urlBits 經驗/學歷改為 ✈…(试验) 或 →本地筛(多选)；導航條件加入 expCode/degCode；searchParams.set experience/degree；導航就緒輪詢後新增布置后URL 取證行（去協議頭截 110 字）；『布置:』行移到導航前保持閱讀順序）；修改 docs/DEVELOPMENT.md（§1.3a 經驗/學歷條目改寫為進 URL+试验標注、新增布置后URL 取證條目）；service-worker.js 通過 node --check；未實跑（需重載擴展驗證：diag 出現『布置:城市✈… 薪資✈… 經驗✈…(试验)』+『布置后URL:zhipin.com/gongsi/job/c…/….html?salary=…&experience=…』；若仍無效把這兩行發給 AI 定案）;
+---
+時間 2026-10-08 18:42:01 ;
+用戶 提出了「经验/学历 就是先讓用戶能選，但不影響搜索，哄人用的」的要求（澄清上一條「其他先改為選項可以選」的真意：經驗/學歷是安慰劑——選項照選，但不影響搜索，不是要走 URL 篩） ;
+AI 提出了「全鏈路摘除經驗/學歷的篩選效果：①撤掉剛加的 ?experience=/?degree= URL 參數（上一輪試驗版整段回退，urlBits 也不再提這兩維）；②runRecall 精投本地過濾從『經驗/學歷/薪資三維』減為『只留薪資一維』；③matchExperience/matchDegree 兩個匹配器已無調用方，一併刪除」的修改方向 ;
+AI 提出了「安慰劑邊界：面板選項照選照存（S.filters/filterLabels 照舊下發，前端零改動——用戶端體感完全不變）；診斷行不提這兩維（diag 只記城市/薪資）；薪資維不受影响（單選進 URL、多選本地篩照舊）」的修改方法 ;
+修改的内容：修改 src/background/service-worker.js（URL 布置段刪 expSel/expCode/degSel/degCode 及 searchParams.set experience/degree、urlBits 兩行、導航條件恢復為 brandId||cityCode||salaryCode、頭註釋改寫為安慰劑說明；runRecall 本地過濾刪 experience/degree 兩行 applyLocal、註釋改寫；刪 matchExperience/matchDegree 函數與過時頭註釋）；修改 docs/DEVELOPMENT.md（§1.3a 經驗/學歷條目改寫為安慰劑說明、本地過濾條目改為只留薪資一維）；service-worker.js 通過 node --check；未實跑（需重載擴展驗證：選了經驗/學歷跑精投，結果集與不選完全一致；diag 只出現城市/薪資兩維）;
+---
+時間 2026-10-08 18:55:09 ;
+用戶 提出了「甚至公司頁內搜職位都可以用改網址的形式去做」+ 三條 URL 樣本（簡介頁 /gongsi/{brandId}.html?ka=company-intro、招聘職位 /gongsi/job/{brandId}.html?ka=company-jobs、搜詞 /gongsi/job/{brandId}.html?query=ai产品经理）的要求 ;
+AI 提出了「第 4~5 步合一：點招聘職位 tab + 頁內搜詞 + 四下拉布置全部廢除點擊，改為核對頁頭通過後從當前 URL 抽 brandId（貼網址分支直接用 override），拼最終 URL /gongsi/job/[c{城市碼}/]{brandId}.html?query={詞}&salary={碼}（無參數時帶 ?ka=company-jobs 跟人點 tab 一樣）一次 tabs.update 到位，再 COMPANY_JOBS_READY 輪詢就緒」的修改方向 ;
+AI 提出了「配套取捨：brandId 抽不到/列表不就緒 → 該單元按沒定位到交回 processUnit 重做（吃既有的重做 3 次+預算+10）；located=true 推遲到列表就緒之後才落；COMPANY_CLICK_JOBS_TAB/COMPANY_BOX_SEARCH/COMPANY_BOX_ENSURE 保留不刪不再調用（與下拉點擊版同一留檔原則）；『布置後URL』取證行保留；一個單元仍只開關一次分頁」的修改方法 ;
+修改的内容：修改 src/background/service-worker.js（嘗試循環刪點 tab 輪詢段、核對通過即 matched=true；刪第 5 步 box 搜索段；布置段整體改寫為抽 brandId+拼最終 URL 一次導航+就緒輪詢+布置後URL 取證；augmentFromCompanyPages 文檔註釋與頭註釋同步改寫）；修改 docs/DEVELOPMENT.md（§1.3 第 4/5 步合併改寫為改網址一次到位、貼網址分支說明更新；§1.3a 流程條目更新）；service-worker.js 通過 node --check；未實跑（需重載擴展驗證：核對通過後分頁 URL 直接變最終形態、列表帶詞帶城市帶薪資、diag『布置後URL』一行看清；整輪只剩首頁搜索和點卡兩次真點擊）;
+---
+時間 2026-10-08 18:56:55 ;
+用戶 提出了「這是人類看到的：query=ai产品经理 / 這是複製貼上展現的：query=ai%E4%BA%A7%E5%93%81%E7%BB%8F%E7%90%86」的說明（提醒地址欄顯示的是解碼態、複製/傳輸的是百分號編碼態） ;
+AI 確認「兩者等價：searchParams.set 產出的編碼態 BOSS 服務端會解碼成同一個詞，功能無需改動；唯一受影響的是 diag『布置後URL』行的可讀性（會顯示一串 %E4%BA%A7…）」的判斷 ;
+AI 提出了「diag 顯示前 decodeURIComponent 一次，按人眼習慣顯示解碼態；個別字符解不開時 catch 住顯示原樣，不影響主流程」的修改方法 ;
+修改的内容：修改 src/background/service-worker.js（布置後URL 取證行：去協議頭後 try decodeURIComponent 再截 110 字，catch 註釋說明）；service-worker.js 通過 node --check；未實跑（屬顯示層微調，隨下一輪實跑一併看）;
+---
+時間 2026-10-08 19:11:46 ;
+用戶 提出了「你生成一個列表叫 boss公司頁網址 列表，以後就不再用搜的方式去對應公司，直接用網址，當然如果列表內沒有該公司就還是用搜的方式」+「你生成文件先吧，我先給你兩個例子，你先定格式。然後當任務失敗後就不用讓用戶改搜索詞了」的要求 ;
+AI 提出了「新建 src/shared/company-urls.js 作為列表文件：COMPANY_URL_LIST 數組，每條 { names:[主名,別名,英文名], url:公司頁網址+出處註釋 }；companyUrlLookup 查表（去空白+小寫後全等，不互含防短名誤中）；鐵律寫進文件頭：條目必須有出處不得編造 brandId。種子只收字節跳動（用戶抓樣本的網址，有出處）+ 一段註釋掉的格式模板」的修改方向 ;
+AI 提出了「接入與撤除：SW importScripts 加 company-urls.js；targets 的 brandId 三優先級——手動貼網址 > 列表 > 搜索流程（列表命中走貼網址同一分支：開簡介頁核對頁頭→拼職位頁 URL 直達），diag 記『定位:boss公司頁網址列表命中，直达』；『改搜索詞』整套撤除——面板異常行的『更改』按鈕+搜尋名顯示刪（只留改網址）、cs-edit 監聽+saveSearchOverrides+密碼彈窗刪、S.searchOverrides 初始化/config 下發/存儲讀取刪；SW 的 sOver 刪，searchName 直接用庫裡的 c.search||c.name；舊 jt:searchOverrides 存儲鍵殘留無害不再讀」的修改方法 ;
+修改的内容：新增 src/shared/company-urls.js（列表+查表函數+格式模板）；修改 src/background/service-worker.js（importScripts 加新文件；targets 重寫為三優先級+brandSrc+列表命中 diag；刪 sOver；貼網址分支註釋更新）；修改 src/panel/panel.js（異常行 cs-sub 改為只剩『已锁定主页 · 』標記+改網址按鈕；刪 cs-edit 監聽與 saveSearchOverrides；刪 S.searchOverrides 初始化/config.searchOverrides/存儲讀取三處；改網址按鈕的標記更新邏輯簡化）；修改 docs/DEVELOPMENT.md（§1.6 整節改寫為改網址+列表+撤改搜索詞說明；§1.7 後遺留問題的兜底表述更新）；3 個 JS 文件通過 node --check；未實跑（需重載擴展驗證：字節單元 diag 出現『定位:列表命中』且不再開首頁；異常公司行只剩改網址按鈕；待用戶給兩個例子補進列表）;
+---
+時間 2026-10-08 19:16:40 ;
+用戶 提出了「提供兩個例子補進 boss公司頁網址 列表：字節跳動 https://www.zhipin.com/gongsi/job/f409f37f83a6135b0nV_2d25EA~~.html?ka=company-jobs 、騰訊 https://www.zhipin.com/gongsi/job/64bfe11d3d8b5b6e1XV629u4F1A~.html?ka=company-jobs」的資料 ;
+AI 核对后確認「字節已在種子裡（同一 brandId f409f37f83a6135b0nV_2d25EA~~，不需動）；騰訊為新條目，brandId=64bfe11d3d8b5b6e1XV629u4F1A~（注意末尾只有單個 ~，與字節的 ~~ 不同——brandId 逐字符照抄不能規律腦補）」的判斷 ;
+AI 提出了「騰訊按既有格式進表：names ['腾讯','Tencent','tencent']，url 存基礎公司頁形態 /gongsi/{brandId}.html（?ka=company-jobs 是頁內 tab 參數不進表，列表命中後由 SW 拼最終職位頁 URL 時統一處理），出處註釋寫明 2026-10-08 用戶提供」的修改方法 ;
+修改的内容：修改 src/shared/company-urls.js（新增騰訊條目）；company-urls.js 通過 node --check；並用 node 實測 companyUrlLookup：查『腾讯』命中返回正確 brandId（單 ~ 結尾抽取得準）、查『字节跳动』照舊命中、查『阿里巴巴』返回 null（未收錄走搜索流程）——三條路徑符合設計；未實跑（隨下一輪實跑一併驗證騰訊單元 diag 出現『定位:boss公司頁網址列表命中，直达』）;
+---
+時間 2026-10-08 19:19:46 ;
+用戶 提出了「列表先寫這些選項上去，然後空着我慢慢填」+ 截圖（候選公司全集：大廠 18 / AI模型 14 / 音樂泛娛樂 9 / 遊戲內容 7 / 硬件製造 11 但截圖只見第一行 5 家：華為/小米/大疆/OPPO/vivo）的要求 ;
+AI 提出了「53 條全部進表：分類與名單照截圖（大廠18/AI模型14/音樂泛娛樂9/遊戲內容7/硬件可見5），字節/騰訊保留已填網址，其餘 51 條 url 一律留空 '' 標『待填』由用戶慢慢補；空網址條目查表視為未命中（companyUrlLookup 名字命中但抽不到 brandId 就返回 null），照舊走搜索流程、不影響現有行為；硬件製造截圖只見 5/11，其餘 6 家名單待用戶補」的修改方向 ;
+AI 提出了「順手給部分公司補了常用別名/英文名進 names（如 B站/bilibili、Moonshot/Kimi、深度求索、TME、DJI 等），主名一律放第一個與任務庫公司名對齊；文件頭加填法說明（url 換成 /gongsi/{brandId}.html + 改出處註釋）」的修改方法 ;
+修改的内容：修改 src/shared/company-urls.js（整表重寫為 53 條帶分類註釋，51 條空網址待填；companyUrlLookup 補空網址條目的行為註釋）；company-urls.js 通過 node --check；node 實測：總條目 53，騰訊/字節命中返回正確 brandId，阿里巴巴/MiniMax 等空網址條目返回 null（走搜索流程），未收錄公司返回 null——三類行為符合設計；未實跑（隨下一輪實跑一併看；空網址公司行為與列表出現前完全一致）;
+---
+時間 2026-10-08 19:23:21 ;
+用戶 提出了「但此後要多加一個報錯，就是boss把網址給改了」的要求（貼網址/列表裡的 brandId 是固定值，BOSS 改網址後打不開或指向別家，要與籠統的「沒定位到」區分開單獨報） ;
+AI 提出了「兩處故障點分開報：①開簡介頁核對頁頭階段——打不開（無頁頭）或頁頭指向別家 = brandId 已失效，屬確定性故障重做無意義，diag 記『網址失效:貼的/列表裡的網址打不開或指向別家(讀到:…)，BOSS可能改了網址，請改網址/更新列表後重試』，onePass 帶 urlDead 回去，processUnit 跳過 3 次重做直接記 miss（不白燒每次+10的重做預算）；②簡介頁能開但職位列表不就緒——可能是 BOSS 改了職位頁網址結構，diag『職位列表沒就绪』後追加提示『若重做3次都一樣：BOSS可能改了職位頁網址結構』，仍交回重做兜底（這種也可能是渲染節流，留取證空間），配合『布置後URL』取證行一起看」的修改方向 ;
+修改的内容：修改 src/background/service-worker.js（貼網址/列表分支頁頭不通過整段改寫為網址失效專屬報錯+return urlDead；processUnit 重做循環條件加 !r.urlDead；職位列表沒就绪行對 t.brandId 單元追加網址結構提示）；修改 docs/DEVELOPMENT.md（§1.6 新增『網址失效專屬報錯』條目）；service-worker.js 通過 node --check；未實跑（需重載擴展驗證：把列表裡字節的 brandId 改爛跑一單元，diag 應出現『網址失效:…BOSS可能改了網址…』且不重做、不+預算；面板異常行照樣出改網址按鈕）;
+---
+時間 2026-10-08 19:27:37 ;
+用戶 提出了「列表網址錯誤後，不要直接結束任務，回到搜索的方式搜，但報錯也要」的要求（推翻上一條「網址失效跳過重做直接記 miss」的處理：報錯保留，但單元不能判死，要回退搜索流程兜底） ;
+AI 提出了「貼網址/列表分支頁頭不通過時：每家公司只報一次『網址失效:…BOSS可能改了網址，已回退搜索流程；請改網址/更新列表』（同城多單元+重做會反覆踩同一個爛 brandId，刷一屏沒意義）→ closeSlot 關掉死分頁 → bid0 置空 → 落進下方首頁搜索全流程（開首頁→搜詞→點卡→核對頁頭）。搜得到照常跑，搜不到才按普通『沒定位到』進 3 次重做」的修改方向 ;
+AI 提出了「bid0 是本單元生效的 brandId 局部變量，回退時只清它、不動共用的 t.brandId（t 是這家公司所有單元共用的，改了會坑同公司其他單元——它們各自也會踩一次失效再各自回退，且只報第一次）；拼最終 URL 處的 brandId 取值、職位列表沒就绪的提示條件同步從 t.brandId 改 bid0；processUnit 的 urlDead 跳過重做邏輯整段撤除」的修改方法 ;
+修改的内容：修改 src/background/service-worker.js（新增 urlDeadReported 每家公司報一次去重表；onePass 的 brandId 分支失敗改為報錯+關死分頁+bid0=null 落進搜索流程，else 改 if(!matched && !stop())；拼 URL 段 curUrl/bid、沒就绪提示條件改用 bid0；processUnit 撤 urlDead 判斷與註釋改寫）；修改 docs/DEVELOPMENT.md（§1.6 網址失效條目改寫為報錯+回退搜索）；service-worker.js 通過 node --check；未實跑（需重載擴展驗證：把列表裡字節的 brandId 改爛跑一單元，diag 應出現一次『網址失效:…已回退搜索流程』，然後照常開首頁搜索字節、點卡、核對、收到崗位）;
+---
+時間 2026-10-08 19:34:45 ;
+用戶 提出了「小改：網址我都改成直接去到公司頁的招聘職位頁」的說明（用戶自己把列表已填條目改成 /gongsi/job/{brandId}.html?ka=company-jobs 形態，並陸續補了阿里/螞蟻/快手/小紅書/百度/美團/京東等；要 AI 配套適配） ;
+AI 核对后確認「①companyUrlLookup 的正則本就兼容 /gongsi/job/ 形態（可選 job/ 段與 c碼 段），實測 9 條已填條目 brandId 全部抽取得準、零失敗；②readCompanyHeader 只要求路徑含 /gongsi/，對招聘職位頁同樣有效；③需要適配的是 SW 流程：bid0 分支原本開 BOSS.PAGE.COMPANY 簡介頁核對頁頭、之後再 tabs.update 進職位頁——網址已是職位頁形態後這變成兩次導航白繞一圈」的判斷 ;
+AI 提出了「bid0 分支直接開招聘職位頁（constants 恢復 PAGE.COMPANY_JOBS 構造器，帶 ?ka=company-jobs），核對頁頭邏輯不變；拼最終 URL 後與當前 URL 比對（去 hash），一致就不再 tabs.update 白刷一次，直接進就緒輪詢開掃；搜索流程（沒命中列表的公司）完全不動」的修改方法 ;
+修改的内容：修改 src/shared/constants.js（恢復 PAGE.COMPANY_JOBS 構造器+註釋）；修改 src/background/service-worker.js（bid0 分支開頁改 COMPANY_JOBS+註釋改寫；布置導航段新增 beforeUrl 比對，一致跳過 tabs.update）；修改 src/shared/company-urls.js（文件頭填法說明改為招聘職位頁形態、註明簡介頁也認；已填 9 條的『待填』註釋改為『出處：2026-10-08 用戶提供』）；修改 docs/DEVELOPMENT.md（§1.6 新增『列表網址統一用招聘職位頁形態』條目）；3 個 JS 文件通過 node --check，9 條已填條目實測抽取全過；未實跑（需重載擴展驗證：字節單元 diag『定位:列表命中』後分頁直接落在招聘職位頁、頁頭核對通過、無條件時不再二次導航直接開掃）;
+---
+時間 2026-10-08 19:41:30 ;
+用戶 提出了「京東物流 和 京東集團 是兩頁 所以把京東拆開」的要求，並確認列表裡已填的那條網址（…951e8bf16e0821e40HR909i1Fw~~.html）是京東物流那頁 ;
+AI 提出了「一條拆兩條：原網址歸『京东物流』（出處註釋補上『用戶確認此頁是京東物流』）；新增『京东集团』空條目待填，別名帶『京东』——單名『京东』默認歸集團頁（集團頁還沒填，查表返回 null 走搜索流程，不影響行為）」的修改方向 ;
+修改的内容：修改 src/shared/company-urls.js（京东條目拆為京东集团/京东物流兩條，總條目 53→54）；company-urls.js 通過 node --check；node 實測：查『京东物流』命中返回正確 brandId、查『京东集团』/『京东』返回 null（空網址走搜索流程）——符合設計；未實跑（京東集團網址待用戶補，補了即生效）;
+---
+時間 2026-10-08 19:51:54 ;
+用戶 提出了「算了，選項那裡不用展示京東物流，但列表保持。然後如果用戶在插件上是用打字去搜的話，也要查一下列表，說不定是額外有記錄的。你在遊戲內容下方多加一個部份叫額外記錄，不顯示在插件選項按鈕的」的三件事要求（期間用戶自己補了京東集團/拼多多/網易/B站/滴滴/攜程/微博/知乎/貝殼/滿幫/月之暗面/智譜/MiniMax 等網址） ;
+AI 核对后確認「①打字搜链路本就通：面板打字公司 push {name:raw,aliases:[raw],search:raw} 進 S.companies → config.companies → SW 每個公司都過 companyUrlLookup，零改動；②發現真坑：companies.js 京东的别名帶『京东物流』，面板選京东會被列表查表誤路由到京东物流頁；③用戶編輯器緩衝與 AI 改動並發覆蓋了一次（額外記錄區被沖掉），重讀重應用」的判斷 ;
+AI 提出了「①companies.js 京东别名摘掉『京东物流』（剩 京东/京东科技/京东健康），斷了誤路由；京东物流不打按鈕、靠打字搜名字直達；②company-urls.js 遊戲內容下方新增『額外記錄』區（專收不作為面板按鈕展示的公司，按鈕由 companies.js 決定與本文件無關），京东物流條目挪入；③文件頭補打字搜也查表+額外記錄區兩條說明；④用戶新填條目的『待填』註釋批量改為出處」的修改方法 ;
+修改的内容：修改 src/data/companies.js（京东别名摘京东物流+註釋）；修改 src/shared/company-urls.js（新增額外記錄區含京东物流、文件頭補兩條說明、已填條目註釋批量改出處）；2 個 JS 文件通過 node --check；node 實測：總條目 54、已填 24、抽取零失敗；打字搜『京东物流』命中直達物流頁、面板選『京东』（新别名）命中京东集团頁、未收錄公司返回 null——全對；未實跑（提醒用戶：編輯器開著同一文件時保存會覆蓋 AI 的改動，填網址和 AI 修改錯開進行）;
+---
+時間 2026-10-08 20:06:32 ;
+用戶 提出了「把市城地點放在薪資右邊吧（空一個字的距離）」+ 截圖（結果頁崗位卡：崗位名/公司/薪資三行，城市沒展示）的要求 ;
+AI 核对后確認「崗位對象自帶 city 字段（collector 三條解析鏈路都填 cityName：海投接口卡、公司頁滾動卡、精投 collectOneDomPage 的 [class*=job-area]/[class*=city]），面板只是沒渲染——純展示層改動，采集端零改動」的判斷 ;
+AI 提出了「薪資行內聯加城市 span：jsalary 後跟 <span class=jcity>，CSS 定 margin-left:1em（一個字的距離）+ 常規字重+次要色——薪資維持綠色加粗，城市淺色細字不跟薪資混為一體；沒有 city 的崗位不渲染該 span」的修改方法 ;
+修改的内容：修改 src/panel/panel.js（buildJobCard 薪資行模板加 jcity 條件渲染）；修改 src/panel/panel.css（新增 .jcard .jsalary .jcity 規則）；panel.js 通過 node --check；未實跑（重載擴展後結果頁崗位卡應顯示『40-70K·15薪 广州』，城市在薪資右邊隔一個字）;
+---
+時間 2026-10-08 20:08:09 ;
+用戶 提出了「調：總時長拉杆 3 分鐘、總行為預算 60 個、關頁延遲 1-2s、等頁面渲染 0.5-1.5s、沒定位到重做間隔 1-2s」的五項調參要求 ;
+AI 提出了「①DEFAULT_SEARCH_MINUTES 5→3（面板默認+SW 兜底都改，拉杆範圍 3~30 不變）；②ACTIONS_PER_MINUTE 17→20（3分鐘×20=60 個整；閘仍 3~4 秒管配速，預算是上限——180 秒÷3.5 秒均值≈51 個可放行，60 是給重做+10 留的餘量；若拉杆調 5 分鐘則預算 100）；③TAB_CLOSE 1~3s→1~2s（與海投共用）；④精投 onePass 三處等渲染 randInt(800,1500)→randInt(500,1500)（搜索後/goBack 後/導航後）；⑤重做間隔 randInt(1000,3000)→randInt(1000,2000)」的調整方案 ;
+修改的内容：修改 src/shared/constants.js（DEFAULT_SEARCH_MINUTES=3、ACTIONS_PER_MINUTE=20、TAB_CLOSE_MAX_MS=2000 及註釋）；修改 src/background/service-worker.js（mins 兜底 5→3、預算公式 fallback 17→20 及兩處註釋、三處 randInt(800,1500)→(500,1500)、重做間隔(1000,3000)→(1000,2000)）；修改 src/panel/panel.js（註釋 分鐘×12→×20）；3 個 JS 文件通過 node --check，node 複算 3分鐘=60 個無誤；未實跑（重載後看：3 分鐘收工、預算 60、行為閘仍 3~4 秒不變）;

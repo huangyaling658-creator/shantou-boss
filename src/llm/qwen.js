@@ -6,10 +6,14 @@
 // 由服务器贴 key 转发 DashScope，响应原样传回。模型/提示词/参数全不变，
 // 效果与直连一致；secrets.js 里的 QWEN_KEY 从此空置即可。
 //
-// 一个厂商同时提供视觉和文本模型，模型分工不变：
-//   qwen-vl-plus 简历截图 OCR（只在换简历时跑一次）
-//   qwen-plus    四维打分（量大，选便宜快的）
-//   qwen-max     招呼语（量小但直接决定回复率，选好的）
+// 模型分工（以 src/shared/constants.js 的实际配置为准，此处为快照 2026-10-08）：
+//   qwen-vl-plus 简历截图 OCR（MODEL_VISION，只在换简历时跑一次）
+//   qwen-plus    四维打分（MODEL_SCORE，量大，选便宜快的）
+//   qwen-plus    招呼语（MODEL_GREETING——注意：qwen-max 效果更好，
+//                但该 DashScope 账号「仅免费额度」模式下 qwen-max/qwen-vl-max
+//                的免费额度已耗尽（403 FreeTierOnly），充值/关闭该模式后
+//                把 constants.js 的 MODEL_GREETING 改回 qwen-max 即可启用）
+// 中转接口的模型白名单已包含全部 4 个型号，升级时平台侧无需改动。
 //
 // 走接口抽象，将来要换厂商或改走自己的网关，只需另写一个同形状的对象。
 // ════════════════════════════════════════════════════════════════

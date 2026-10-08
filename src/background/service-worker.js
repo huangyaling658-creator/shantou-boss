@@ -10,6 +10,7 @@ importScripts(
   '../shared/constants.js',
   '../shared/utils.js',
   '../shared/secrets.js',
+  '../shared/company-urls.js',  // boss公司頁網址 列表：公司名→公司页网址，精投定位先查表再搜索（2026-10-08 用户定）
   '../shared/tracker.js',      // 埋点：本地储存 + 配了 ANALYTICS_ENDPOINT 后定时上报（见文件尾 alarm）
   '../db/repository.js',
   '../data/writing-rules.js',
@@ -110,8 +111,13 @@ function waitForTabComplete(tabId, timeoutMs = 20000) {
 }
 
 async function pingTab(tabId) {
+  // 2026-10-08 坑：标签页被冻结/风控卡死时，content script 监听还在但永不响应，
+  // sendMessage 的 Promise 会永远挂起——ensureBossTab 卡死、整批任务无声停摆。
+  // 所以 ping 必须带超时（5 秒），超时按「没就绪」走补注入/降级流程。
   try {
-    const r = await chrome.tabs.sendMessage(tabId, { type: MSG.PING });
+    const r = await U.withTimeout(
+      chrome.tabs.sendMessage(tabId, { type: MSG.PING }),
+      CONFIG.PING_TIMEOUT_MS || 5000, 'ping_timeout');
     return r || { ok: false };
   } catch (e) {
     return { ok: false, error: String(e.message || e) };
@@ -134,7 +140,7 @@ async function askTab(tabId, type, payload, timeoutMs) {
 // 无论几个标签在跑，全局每 N 秒随机只放行一个「行为」。用「预约下一个时间槽」
 // 保证并发的 worker 依次拿到往后排的槽（先到先得≈轮流派发），不会一起放行。
 // 任意时刻只有一个请求在飞、均匀无突刺，这是躲限流(code:37)的关键。
-// 间隔区间各模式自带（精投 4~6 秒；海投 2026-10-07 起 3~4 秒）；
+// 间隔区间各模式自带（2026-10-08 起精投/海投统一 3~4 秒）；
 // 槽链 nextTurnAt 全局一条，两模式不会同时跑。
 let nextTurnAt = 0;
 async function acquireTurnGlobal(minMs, maxMs) {
@@ -197,7 +203,6 @@ async function runHaitouScroll(config, merged, onProgress) {
   const perUnit = Math.max(3, Math.floor(budget / Math.max(1, units.length)));
   let actionsDone = 0;
   const perCity = {};
-  const doneUnits = [];   // 恢复搜索（需求 #11）：完整跑完的单元 "cityCode|kw"，手动停止时落进断点
   const stop = () => state.stopRequested || state.task.phase === 'aborted' || Date.now() >= taskDeadline
     || actionsDone >= budget || merged.size >= maxResults;
   // 布置闸：海投布置阶段每个动作 1~2 秒随机一个（用户 2026-10-07 由 2~3 改 1~2，HAITOU_LAYOUT_*）。
@@ -249,8 +254,6 @@ async function runHaitouScroll(config, merged, onProgress) {
   };
 
   await runInBatches(units, CONFIG.HAITOU_MAX_TABS || 5, async ({ code: cityCode, name: cityName, kw }) => {
-    const unitKey = `${cityCode}|${kw}`;
-    if (config._skipUnits && config._skipUnits.has(unitKey)) return;   // 恢复搜索：已完成单元跳过
     if (stop()) return;
     // 筛选条件分流：顺着结果页筛选栏从左到右的次序点（用户 2026-10-07 定），不限/没选 = 跳过。
     // 行业是主选+副选结构，副选 BOSS 限 3 个（用户 2026-10-07 告知）→ 最多点 3 个，超出如实上报；
@@ -424,109 +427,113 @@ async function runHaitouScroll(config, merged, onProgress) {
     } finally {
       closeTabLater(tabId);   // 模仿人类：用完隔 1~3 秒随机再关，不秒删
     }
-    if (!stop()) doneUnits.push(unitKey);   // 没被停止/到闸 = 这个单元完整跑完，记进断点
   });
-  return { actionsDone, perCity, doneUnits };
+  return { actionsDone, perCity };
+}
+
+// ── 精投布置 + 本地过滤（2026-10-08 用户定）──────────────────────
+// 公司页筛选：城市+薪资走 URL 布置（服务端筛），多选薪资走本地筛。
+// 经验/学历是安慰剂（用户定：能选但不影响搜索），不进 URL 也不本地筛。
+
+const _normSel = (s) => String(s || '').replace(/[（(][^)）]*[)）]/g, '').replace(/\s+/g, '').replace(/经验|学历/g, '');
+
+/** 薪资档位 label → [min,max]（K）：'20-50K'→[20,50]，'50K以上'→[50,∞]，'3K以下'→[0,3] */
+function _salRangeOfLabel(l) {
+  const s = _normSel(l);
+  let m = s.match(/(\d+(?:\.\d+)?)-(\d+(?:\.\d+)?)K/i); if (m) return [parseFloat(m[1]), parseFloat(m[2])];
+  m = s.match(/(\d+(?:\.\d+)?)K以上/i); if (m) return [parseFloat(m[1]), Infinity];
+  m = s.match(/(\d+(?:\.\d+)?)K以下/i); if (m) return [0, parseFloat(m[1])];
+  return null;
+}
+
+/** 薪资匹配：面议/没解析到的保留；岗位区间与任一选中档位相交即留 */
+function matchSalary(job, labels) {
+  if (!labels.length) return true;
+  if (job.salaryMin == null && job.salaryMax == null) return true;
+  const ranges = labels.map(_salRangeOfLabel).filter(Boolean);
+  if (!ranges.length) return true;
+  const jmin = job.salaryMin || 0, jmax = job.salaryMax == null ? Infinity : job.salaryMax;
+  return ranges.some(([lo, hi]) => jmax >= lo && jmin <= hi);
 }
 
 /**
- * 精投终极：对每家目标公司，从已搜到的岗位里认出它的 brandId，
- * 直接翻公司主页 /gongsi/{brandId}.html，把全部在招岗位拉回来并进 merged。
- *
- * brandId 怎么来：搜索结果里每个岗位都带 companyId(encryptBrandId)+companyName。
- * 对每家目标公司，取「companyName 命中该公司名/别名」的岗位里出现最多的那个
- * companyId 当它的 brandId。这样不用猜接口、也顺带避开了同名多主体里的小众主体。
+ * 精投（2026-10-08 用户定的真人链路，微重做）：每个单元一个分页从首页走起——
+ * 首页搜索栏打公司搜寻名 → 结果页点卡片左下角最贴合的公司名进公司页 →
+ * 核对页头公司名（不吻合回结果页试点优的卡，最多 3 张）→
+ * 改网址一次到位（招聘职位+搜词+布置：/gongsi/job/[c{城市码}/]{brandId}.html?query=词&salary=码）→
+ * 翻页扫卡收答案。一个分页从头到尾开一次、关一次（用户定）；点招聘职位 tab / 页内搜索框 /
+ * 四下拉的点击版代码保留不删不再调用（BOSS 改 URL 结构可切回）。
  *
  * @returns {number} 新增岗位数
  */
-/**
- * 公司名 → brandId。
- * 导航到「搜公司名」的搜索页，用带签名的 MAIN 世界复放抓第 1 页（裸 fetch 会被
- * code:19 拒），从返回岗位的 companyId(encryptBrandId) 里投票选出目标公司的 brandId。
- */
-async function resolveBrandId(tabId, company, filters) {
-  try {
-    await chrome.tabs.update(tabId, { url: buildSearchUrl({ ...filters, query: company.name }), active: true });
-    await waitForTabComplete(tabId);
-    for (let i = 0; i < 16; i++) { await U.sleep(400); if ((await pingTab(tabId)).ok) break; }
-    await U.sleep(1500);   // 等页面发首屏、嗅探器捕到模板
-
-    // 只抓 1 页，走和正式采集同一套签名复放
-    const res = await askTab(tabId, MSG.COLLECT_PAGES, { maxPages: 1 });
-    const jobs = (res && res.jobs) || [];
-    const keys = [company.name, ...(company.aliases || [])].map((s) => String(s).toLowerCase());
-    const votes = new Map();
-    for (const j of jobs) {
-      const cn = (j.companyName || '').toLowerCase();
-      if (j.companyId && keys.some((k) => k && (cn.includes(k) || k.includes(cn)))) {
-        votes.set(j.companyId, (votes.get(j.companyId) || 0) + 1);
-      }
-    }
-    if (votes.size) return [...votes.entries()].sort((a, b) => b[1] - a[1])[0][0];
-    // 名字没匹配上但有结果：退而取出现最多的 companyId（搜公司名时首屏基本就是这家）
-    const any = new Map();
-    for (const j of jobs) if (j.companyId) any.set(j.companyId, (any.get(j.companyId) || 0) + 1);
-    if (any.size) return [...any.entries()].sort((a, b) => b[1] - a[1])[0][0];
-    console.log('[闪投] brandId 反查：第1页没拿到岗位', company.name);
-    return null;
-  } catch (e) {
-    console.log('[闪投] brandId 反查失败', company.name, String(e.message || e));
-    return null;
-  }
-}
-
 async function augmentFromCompanyPages(merged, config, onProgress) {
   const companies = (config.companies || []);
   if (!companies.length) return 0;
 
-  // 复现人类链路：进公司主页 → 在公司页的「职位搜索框」里逐个打岗位词 → 翻到底 → 并集。
-  // 量优先：不注入职位类型类目、不注入城市、不设相关度闸门。公司精准由「在公司页里」
-  // 天然保证；城市/去重等减法留到第二阶段。
+  // 真人链路（用户 2026-10-08 定）：开首页 → 搜公司名 → 点卡进公司页 → 核对 →
+  // 改网址一次到位（招聘职位+搜词+布置）→ 翻页扫卡 → 并集。全程一个分页。
+  // 单元 = 公司 × 城市 × 岗位词：一个单元开一个分页，布置这一个城市 + 搜这一个词。
   const posWords = (config.positions || []).filter(Boolean);
   const queries = posWords.length ? posWords : [''];   // 没填岗位词就拉这家公司全部岗
 
   const diag = [];
-  const brandMiss = [];   // 没解析到 brandId 的公司名，实时+最终都报给用户
-  const doneCompanies = [];   // 恢复搜索（需求 #11）：完整跑完的公司，手动停止时落进断点
+  const brandMiss = [];   // 没定位到的公司名（首页→搜→点卡→核对 全走完仍没进对门），实时+最终都报给用户
   augmentFromCompanyPages._diag = diag;
   augmentFromCompanyPages._brandMiss = brandMiss;
-  augmentFromCompanyPages._doneCompanies = doneCompanies;
 
-  // 要开多少个分页：公司数，封顶 8。这个 P 同时是冷却公式里的 N（固定，不随收完变）。
-  const P = Math.max(1, Math.min(CONFIG.PARALLEL_COMPANIES || 2, companies.length));
+  // 城市维度（用户 2026-10-08 定）：新开分页数 = 公司数 × 城市数 × 岗位词数。
+  // 全国/没选城市 → 只有一个不带城市的单元（城市维度跳「全部」，本地过滤兜底）。
+  const cityUnits = (config.cityNames || []).filter((n) => n && n !== '全国');
+  const cityList = cityUnits.length ? cityUnits : [''];
+  // 城市名 → BOSS 城市码（config.cities 与 config.cityNames 是面板同源 S.cities 的平行数组，
+  // URL 布置的路径前缀用，用户 2026-10-08 抓样本反解：/gongsi/job/c{码}/{brandId}.html）
+  const codeOfCity = (name) => {
+    const i = (config.cityNames || []).indexOf(name);
+    return i >= 0 ? String((config.cities || [])[i] || '') : '';
+  };
 
   // 开页闸：每开一个分页全局至少隔 1~2 秒随机，轮流开、不突刺。闸已提升为模块级
   // （acquireOpenSlot，海投开城标签也过同一条闸），这里只留个别名保持可读性。
   const openGate = acquireOpenSlot;
 
-  // 进度：一个「公司×词」是一个单元，总数 = 本轮要跑的公司数 × 词数（恢复搜索时已完成公司不计入）
-  const runCompanies = (config._skipCompanies && config._skipCompanies.size)
-    ? companies.filter((c) => !config._skipCompanies.has(c.name))   // 恢复搜索：已完成公司跳过
-    : companies;
-  const unitTotal = runCompanies.length * queries.length;
   let unitDone = 0;
   let added = 0;
 
-  // 每个分页「一条龙」：先搜公司名读自己的 brandId → 直接进公司页搜职位（都在 processCompany 里）。
-  // 这里只预取「已搜到的岗位」里能投票出的 brandId（精投通常没有，为 null），其余各标签现搜。
-  // 搜索时长：设置里拉杆的分钟数（3~30），决定时间上限 + 行为预算（每分钟≈12个行为）
-  const mins = Math.min(30, Math.max(3, config.searchMinutes || 5));
+  // 搜索时长：设置里拉杆的分钟数（3~30，默认 3），决定时间上限 + 行为预算（每分钟 20 个，3 分钟 = 60 个）
+  const mins = Math.min(30, Math.max(3, config.searchMinutes || 3));
   const taskTimeoutMs = mins * 60000;
   const taskDeadline = (state.task.startedAt || Date.now()) + taskTimeoutMs;
-  const jobs = [...merged.values()];
-  const sOver = config.searchOverrides || {};   // 用户手动改的「搜寻名」（公司名→中文搜寻名）
   const bOver = config.brandOverrides || {};     // 用户贴的公司主页网址抽出的 brandId（公司名→brandId）
-  const targets = runCompanies.map((c) => {
-    const keys = [c.name, ...(c.aliases || [])].map((s) => String(s).toLowerCase());
-    const votes = new Map();
-    for (const j of jobs) {
-      const cn = (j.companyName || '').toLowerCase();
-      if (j.companyId && keys.some((k) => k && cn.includes(k))) votes.set(j.companyId, (votes.get(j.companyId) || 0) + 1);
-    }
-    const voted = votes.size ? [...votes.entries()].sort((a, b) => b[1] - a[1])[0][0] : null;
-    // brandId 覆盖（用户贴网址）最优先，直接用、跳过定位；否则靠搜寻名去搜
-    return { company: c.name, searchName: sOver[c.name] || c.search || c.name, aliases: c.aliases || [], brandId: bOver[c.name] || voted };
+  const targets = companies.map((c) => {
+    // brandId 三优先级（用户 2026-10-08 定）：手动贴网址 > boss公司頁網址列表 > 搜索流程。
+    // 前两者跳过首页搜索/点卡/核对，直接拼职位页 URL 开工；没命中一律走首页全流程。
+    const listHit = companyUrlLookup([c.name, c.search, ...(c.aliases || [])]);
+    return {
+      company: c.name,
+      searchName: c.search || c.name,   // 改搜索词功能已撤（2026-10-08 用户定），用库里的默认搜寻名
+      aliases: c.aliases || [],
+      brandId: bOver[c.name] || (listHit && listHit.brandId) || null,
+      brandSrc: bOver[c.name] ? '贴网址' : (listHit ? '列表' : ''),
+    };
   });
+  for (const t of targets) if (t.brandSrc === '列表') diag.push({ company: t.company, step: '定位:boss公司頁網址列表命中，直达' });
+
+  // 单元装配：公司 × 城市 × 词。
+  const units = [];
+  for (const t of targets) {
+    for (const city of cityList) {
+      for (const kw of queries) {
+        units.push({ t, city, kw });
+      }
+    }
+  }
+  const unitTotal = units.length;
+  // 每次最多同开 8 个分页（用户 2026-10-08 定）：并行池大小 = 单元数封顶 8
+  const P = Math.max(1, Math.min(CONFIG.PARALLEL_COMPANIES || 8, units.length));
+  // 每家公司的剩余单元数 / 是否定位成功过：全部单元跑完才落「已完成」终态（面板按公司展示）
+  const remainBy = {};
+  const locatedBy = {};
+  for (const u of units) remainBy[u.t.company] = (remainBy[u.t.company] || 0) + 1;
 
   // ── 采集：全同步并行，每标签一条龙 ──
   // 选中的公司（最多 PARALLEL_COMPANIES 家）全部同时开跑，各翻各的。每家翻一页后独立随机睡
@@ -561,19 +568,31 @@ async function augmentFromCompanyPages(merged, config, onProgress) {
   };
   // 每家公司的实时状态：locating 定位中 / searching 搜职位中 / done 已完成 / miss 没定位到。
   const statuses = {};
+  const urlDeadReported = {};   // 「网址失效」每家公司只报一次（同城多单元/重做会反复踩同一个烂 brandId）
   const stats = {};   // 每家：{ ms 用时, count 收到数, pages 翻页数 }，完成时用来标异常
   const live = {};    // 每家实时翻页数（工作步数），搜索中逐页更新给面板看
+  const companySeenBy = {};   // 公司名 → 跨单元累计收到的 jobId（一家多单元共用，收够封顶判定用）
   augmentFromCompanyPages._statuses = statuses;
   augmentFromCompanyPages._stats = stats;
   const report = (slot, kw) => { if (onProgress) onProgress({ company: slot.company, keyword: kw, unitDone, unitTotal, collected: merged.size, domPage: slot.page, domMaxPages: slot.maxPages, misses: brandMiss.slice(), statuses: { ...statuses }, live: { ...live }, actionsDone, actionsBudget }); };
 
-  // 全局行为闸（轮流派发）：无论几家在采，全局每 4~6 秒随机才放行一个「翻页行为」。
-  // 5 分钟≈300秒÷5秒均值≈60 个行为，总量有硬顶、均匀无突刺。闸本身是模块级共享的
-  // （acquireTurnGlobal，海投 v2 的滚动行为也过同一条闸），这里只负责本模式的计数。
+  // 全局行为闸（轮流派发）：无论几家在采，全局每 3~4 秒随机才放行一个「翻页行为」
+  // （用户 2026-10-08 由 4~6 改 3~4，与海投一致）。3 分钟≈180秒÷3.5秒均值≈51 个行为可放行，
+  // 预算 60 个是上限（闸管配速，预算到不了顶就到时长收工，用户 2026-10-08 定 3 分钟=60 个）。
+  // 闸本身是模块级共享的（acquireTurnGlobal，海投 v2 的滚动
+  // 行为也过同一条闸），这里只负责本模式的计数。
   let activeCount = 0;   // 仅用于显示/参考
   let actionsDone = 0;   // 已执行的行为数（翻页数），进度% = actionsDone / actionsBudget
-  let actionsBudget = Math.max(1, Math.round(taskTimeoutMs / (60000 / (CONFIG.ACTIONS_PER_MINUTE || 12))));   // 浅搜≈60 / 深搜≈120（重做会 +10）
+  let actionsBudget = Math.max(1, Math.round(taskTimeoutMs / (60000 / (CONFIG.ACTIONS_PER_MINUTE || 20))));   // 3 分钟 = 60 个
   const turnGate = async () => { await acquireTurnGlobal(); actionsDone++; };
+  // 总行为数平分给每个分页（用户 2026-10-08 定）：每个单元最多花自己那一份，花完这个分页收工。
+  // 全局闸照旧管节奏（这是上限不是配速），分到不足 2 的保底 2 个（至少读一页+翻一页）。
+  const perUnitBudget = Math.max(2, Math.floor(actionsBudget / Math.max(1, units.length)));
+  // 份额动态化（用户 2026-10-08 定）：单元提前收工（词翻完/没定位到）没花完的份额不浪费，
+  // 攒进 bonusPool，在 processUnit 里平分给还没跑完的单元（正在跑的 + 还在排队的，含本轮
+  // 取整丢的零头）。份额挂在单元对象上（u.cap / u.actions），onePass 里实时读，加了立即生效。
+  let bonusPool = Math.max(0, actionsBudget - perUnitBudget * units.length);   // 初始平分取整丢的零头也进池
+  for (const u of units) { u.cap = perUnitBudget; u.actions = 0; }
   const stop = () => state.stopRequested || state.task.phase === 'aborted' || timeUp();
 
   const ready = async (tabId) => {   // 等页面加载 + content script 就绪
@@ -582,118 +601,252 @@ async function augmentFromCompanyPages(merged, config, onProgress) {
     await U.sleep(1000);
   };
 
-  // 单次完整跑一家：定位 brandId → 进公司页 → 逐词搜职位。返回 {located, pages}。
-  const onePass = async (t) => {
-    const slot = { company: t.company, brandId: t.brandId, tabId: null, kwi: 0, page: 0, seen: new Set(), companySeen: new Set(), maxPages: pagesCap(), lastHasNext: false, lastNew: 0 };
-    let pagesTotal = 0, located = false;
+  // 等公司简介页页头出现（点卡是整页导航，content 会换人；SW 轮询，最多 ~15 秒）
+  const pollHeader = async (tabId) => {
+    for (let k = 0; k < 15 && !stop(); k++) {
+      if (k) await U.sleep(1000);
+      const r = await askTab(tabId, MSG.READ_COMPANY_HEADER, undefined, 8000).catch(() => null);
+      if (r && r.ok && r.name) return r;
+    }
+    return null;
+  };
+
+  // 跑一个单元（公司×城市×词）：一个分页走完真人链路（开一次、关一次，用户 2026-10-08 定）：
+  // 首页搜公司名 → 点卡片公司名进公司页 → 核对页头 → 点「招聘职位」→ 先搜词再布置 → 翻页扫卡。
+  const onePass = async (u) => {
+    const t = u.t;
+    const slot = { company: t.company, tabId: null, page: 0, seen: new Set(), companySeen: companySeenBy[t.company] || (companySeenBy[t.company] = new Set()), maxPages: pagesCap(), lastHasNext: false, lastNew: 0 };
+    let located = false;
+    // 本单元已花的行为数记在 u.actions（份额 u.cap 是动态的：别的单元提前收工会回流加额）
     activeCount++;
     try {
       await openGate();
       if (stop()) return { located: false, pages: 0 };
-      let brandId = t.brandId;
-      if (!brandId) {
-        statuses[t.company] = 'locating';
-        if (onProgress) onProgress({ company: t.company, keyword: '正在定位公司', unitDone, unitTotal, collected: merged.size, statuses: { ...statuses } });
-        const cands = [...new Set([t.searchName || t.company, t.company, ...(t.aliases || [])].filter(Boolean))].slice(0, 5);
-        for (let ci = 0; ci < cands.length && !brandId && !stop(); ci++) {
-          // 定位只搜公司名、不带职位/城市筛选：否则小公司加了职位筛选后搜不出几条，
-          // 页面被「推荐其他公司」占满，/gongsi/ 投票会投到别家 → 定位到错公司。
-          const url = buildSearchUrl({ query: cands[ci] });
-          // ★ 定位这步必须用【前台】标签页：BOSS 的职位列表是 SPA，后台标签页被 Chrome
-          // 渲染节流，列表常在我们读取时还没渲染出来 → 读到 0 张卡 → 定位失败（腾讯就栽在这）。
-          // 前台加载完整、渲染及时，和海投路径/resolveBrandId 的做法一致。定位完会切回后台开公司页。
-          if (!slot.tabId) { const tab = await chrome.tabs.create({ url, active: true }); slot.tabId = tab.id; }
-          else { await chrome.tabs.update(slot.tabId, { url, active: true }); }
-          await ready(slot.tabId);
-          const names = [t.company, t.searchName, ...(t.aliases || [])].filter(Boolean);   // 按公司名匹配，排除推荐的别家
-          // 轮询读取：SPA 渲染有快有慢，最多等 ~6.4 秒（8 次 ×0.8s），一拿到 brandId 立刻停。
-          for (let k = 0; k < 8 && !brandId; k++) {
-            const r = await askTab(slot.tabId, MSG.READ_BRAND_DOM, { names }).catch(() => null);
-            brandId = r && r.brandId;
-            if (!brandId) await U.sleep(800);
+      statuses[t.company] = 'locating';
+      if (onProgress) onProgress({ company: t.company, keyword: '正在定位公司', unitDone, unitTotal, collected: merged.size, statuses: { ...statuses } });
+
+      // ★ 关键渲染步骤（首页搜索/读卡/核对/布置）前把分页激活到前台：BOSS 的列表是 SPA，
+      // 后台标签被 Chrome 渲染节流会读不到卡（腾讯栽过）。翻页扫卡阶段后台已验证没问题。
+      const front = () => chrome.tabs.update(slot.tabId, { active: true }).catch(() => {});
+      const names = [t.company, t.searchName, ...(t.aliases || [])].filter(Boolean);
+      const nameMatch = (n) => {
+        const ln = String(n || '').toLowerCase();
+        return names.some((x) => { const xl = x.toLowerCase(); return ln.includes(xl) || xl.includes(ln); });
+      };
+      let matched = false;
+      // bid0 = 本单元生效的 brandId（贴网址/列表给的固定值）。网址失效回退搜索后置 null，
+      // 下方拼最终 URL 时就会改用「从当前公司页 URL 抽」的那条路（不能直接改 t.brandId——
+      // t 是这家公司所有单元共用的，改了会坑同公司的其他单元）。
+      let bid0 = t.brandId;
+
+      if (bid0) {
+        // 贴网址/boss公司頁網址列表命中：跳过首页搜索/点卡，直接开「招聘职位」页核对页头
+        // （2026-10-08 用户定：列表网址一律招聘職位頁形態，省「简介页→职位页」一次导航；
+        // READ_COMPANY_HEADER 对 /gongsi/job/ 同样有效，都读 h1/公司名/title）
+        const tab = await chrome.tabs.create({ url: BOSS.PAGE.COMPANY_JOBS(bid0), active: false });
+        slot.tabId = tab.id;
+        await ready(slot.tabId);
+        await front();
+        const hdr = await pollHeader(slot.tabId);
+        if (hdr && nameMatch(hdr.name)) matched = true;
+        else {
+          // 网址失效专属报错（用户 2026-10-08 定）：报错照报，但不判死——关掉这个打不开的
+          // 分页，bid0 置空，落进下方搜索流程兜底。每家公司只报一次（同城多单元/重做会
+          // 反复踩同一个烂 brandId，刷一屏同一行没意义）。
+          if (!urlDeadReported[t.company]) {
+            urlDeadReported[t.company] = 1;
+            const src = t.brandSrc === '贴网址' ? '贴的网址' : '列表里的网址';
+            diag.push({ company: t.company, step: `网址失效:${src}打不开或指向别家(读到:${(hdr && hdr.name) || '无页头'})，BOSS可能改了网址，已回退搜索流程；请改网址/更新列表` });
+            console.log('[闪投] 网址失效（BOSS可能改了网址），回退搜索流程', t.company, t.brandSrc);
           }
+          closeSlot(slot); slot.tabId = null; bid0 = null;
         }
-        if (!brandId) return { located: false, pages: 0 };
-        slot.brandId = brandId;
-        // 读到 brandId 后关搜索标签、开【全新】公司页标签（SPA 同标签导航会半加载，只收 1 页）
-        closeSlot(slot);
-        const tab = await chrome.tabs.create({ url: BOSS.PAGE.COMPANY_JOBS(brandId), active: false });
+      }
+      if (!matched && !stop()) {
+        // ── 第 1~2 步：开首页 → 搜索栏打公司搜寻名点搜索 ──
+        const tab = await chrome.tabs.create({ url: `${BOSS.ORIGIN}/?ka=header-home-logo`, active: false });
         slot.tabId = tab.id;
-      } else {
-        const tab = await chrome.tabs.create({ url: BOSS.PAGE.COMPANY_JOBS(brandId), active: false });
-        slot.tabId = tab.id;
+        await ready(slot.tabId);
+        await front();
+        const hs = await askTab(slot.tabId, MSG.DRIVE_HOME_SEARCH, { keyword: t.searchName || t.company }, 15000).catch(() => null);
+        if (!hs || !hs.ok) {
+          diag.push({ company: t.company, step: '首页搜索没驱动:' + ((hs && hs.reason) || '无响应') });
+          return { located: false, pages: 0 };
+        }
+        await waitForTabComplete(slot.tabId).catch(() => {});
+        await U.sleep(U.randInt(500, 1500));   // 等结果页渲染，人扫一眼（0.5~1.5 秒，2026-10-08 用户定）
+
+        // ── 第 3~4 步：点最贴合的卡进公司页 → 核对页头；不吻合回结果页试点优卡（最多 3 张，用户 2026-10-08 定）──
+        for (let attempt = 0; attempt < 3 && !matched && !stop(); attempt++) {
+          if (attempt > 0) {
+            try { await chrome.tabs.goBack(slot.tabId); } catch (e) { break; }
+            await waitForTabComplete(slot.tabId).catch(() => {});
+            await U.sleep(U.randInt(500, 1500));
+          }
+          await front();
+          const cc = await askTab(slot.tabId, MSG.COMPANY_CLICK_CARD, { names, attempt }, 30000).catch(() => null);
+          if (!cc || !cc.ok) {
+            diag.push({ company: t.company, step: !cc ? '点卡无响应' : `没找到贴合的卡片:${cc.reason}` });
+            break;
+          }
+          const hdr = await pollHeader(slot.tabId);
+          if (!hdr) { diag.push({ company: t.company, step: `点卡「${cc.cardName}」没等到公司页` }); break; }
+          if (!nameMatch(hdr.name)) { diag.push({ company: t.company, step: `页头不吻合:${hdr.name}` }); continue; }   // 回去试点优卡
+          matched = true;   // 进对门。点招聘职位/搜词/布置不再点页面，统一在下方一次改网址到位（用户 2026-10-08 定）
+        }
+      }
+      if (!matched) return { located: false, pages: 0 };
+
+      // ── 第 4~5 步合一（2026-10-08 用户定稿：点招聘职位+搜词+布置全部改网址，一次导航到位）──
+      // 用户抓样本反解：简介页 /gongsi/{brandId}.html?ka=company-intro；招聘职位 =
+      // /gongsi/job/{brandId}.html?ka=company-jobs；搜词 = ?query=词；城市 = 路径前缀
+      // /gongsi/job/c{码}/（码 = 面板 S.cities 的 BOSS 码）；薪资 = ?salary=402~407（与面板
+      // OPT.salary 的 code 一致）。核对页头已通过 → 从当前 URL 抽 brandId（贴网址分支直接用
+      // bid0）→ 拼最终 URL 一次 tabs.update。经验/学历是安慰剂：不进 URL、不参与过滤。
+      // 薪资多选/城市无码 → 不带参数，薪资多选走本地过滤（runRecall 里）。
+      const q = u.kw || '';
+      const salarySel = ((config.filters && config.filters.salary) || []).filter((c) => c);
+      const salaryCode = salarySel.length === 1 ? String(salarySel[0]) : '';
+      const cityCode = u.city ? codeOfCity(u.city) : '';
+      const urlBits = [];
+      if (u.city) urlBits.push(cityCode ? `城市✈${u.city}` : '城市→本地筛(无码)');
+      if (salarySel.length) urlBits.push(salaryCode ? `薪资✈${((config.filterLabels || {}).salary || [])[0] || salaryCode}` : '薪资→本地筛(多选)');
+      diag.push({ company: t.company, step: '布置:' + (urlBits.join(' ') || '无条件可布置') });
+      let jobsReady = false;
+      try {
+        const curUrl = bid0 ? '' : ((await chrome.tabs.get(slot.tabId)).url || '');
+        const m = curUrl.match(/\/gongsi\/(?:job\/)?(?:c\d+\/)?([^.\/?]+)\.html/);
+        const bid = bid0 || (m && m[1]);
+        if (!bid) {
+          diag.push({ company: t.company, step: '没从公司页URL抽到brandId:' + curUrl.replace(/^https?:\/\//, '').slice(0, 60) });
+          return { located: false, pages: 0 };   // 交给 processUnit 重做
+        }
+        const nu = new URL(`${BOSS.ORIGIN}/gongsi/job/${cityCode ? 'c' + cityCode + '/' : ''}${bid}.html`);
+        if (q) nu.searchParams.set('query', q);
+        if (salaryCode) nu.searchParams.set('salary', salaryCode);
+        if (!q && !salaryCode) nu.searchParams.set('ka', 'company-jobs');   // 无参数时带上 ka，跟人点 tab 一样
+        // 贴网址/列表命中时分页已停在招聘职位页：若最终 URL 与当前 URL 一致（无词无薪资
+        // 无城市码），不用再 tabs.update 白刷一次（2026-10-08 用户把列表网址改成职位页形态
+        // 后，「核对页头 → 布置导航」经常其实是同一页）。不一致才导航。
+        await front();   // 关键渲染步骤前激活前台（后台标签 SPA 列表会被节流，腾讯栽过）
+        const beforeUrl = await chrome.tabs.get(slot.tabId).then((tb) => (tb.url || '').split('#')[0]).catch(() => '');
+        if (beforeUrl !== nu.toString()) {
+          await chrome.tabs.update(slot.tabId, { url: nu.toString() });
+          await U.sleep(U.randInt(500, 1500));   // 等 Chrome 真开始导航（防 waitForTabComplete 看到旧的 complete；0.5~1.5 秒）
+          await waitForTabComplete(slot.tabId).catch(() => {});
+        }
+        for (let k = 0; k < 15 && !jobsReady && !stop(); k++) {   // 等职位列表（页内搜索框）就绪
+          if (k) await U.sleep(1000);
+          const r = await askTab(slot.tabId, MSG.COMPANY_JOBS_READY, undefined, 8000).catch(() => null);
+          jobsReady = !!(r && r.ready);
+        }
+        // 取证：把导航后的真实 URL 写进 diag——有 c码/salary/query → 导航成了、无效是 BOSS 没认参数；
+        // 没有 → 导航没成，查异常行。显示前 decode 一次：地址栏人眼看的是解码态（ai产品经理），
+        // 复制出来/传输的是编码态（ai%E4%BA%A7…），两者等价，diag 按人眼习惯显示（用户 2026-10-08 提）。
+        const afterUrl = await chrome.tabs.get(slot.tabId).then((tb) => tb.url || '').catch(() => '');
+        if (afterUrl) {
+          let shown = afterUrl.replace(/^https?:\/\//, '');
+          try { shown = decodeURIComponent(shown); } catch (e) { /* 有个别字符解不开就显示原样 */ }
+          diag.push({ company: t.company, step: '布置后URL:' + shown.slice(0, 110) });
+        }
+      } catch (e) {
+        diag.push({ company: t.company, step: '布置网址异常:' + String(e.message || e).slice(0, 24) });
+      }
+      // 列表没就绪：贴网址/列表单元加一句提示——简介页能开但职位页出不来，可能是 BOSS
+      // 把职位页网址结构改了（这种确定性故障重做也白搭，但先按没定位到交回重做兜底，
+      // 连续 3 次都一样就实锤网址结构变了，看 diag 里这句提示 + 上方「布置后URL」取证行）。
+      if (!jobsReady) {
+        diag.push({ company: t.company, step: '职位列表没就绪' + (bid0 ? '（若重做3次都一样：BOSS可能改了职位页网址结构）' : '') });
+        return { located: false, pages: 0 };
       }
       located = true;
       statuses[t.company] = 'searching';
-      if (onProgress) onProgress({ company: t.company, keyword: '正在打开公司页', unitDone, unitTotal, collected: merged.size, statuses: { ...statuses } });
-      await ready(slot.tabId);
-
-      for (slot.kwi = 0; slot.kwi < queries.length; slot.kwi++) {
+      if (onProgress) onProgress({ company: t.company, keyword: '正在搜职位', unitDone, unitTotal, collected: merged.size, statuses: { ...statuses } });
+      await U.sleep(U.randInt(CONFIG.COMPANY_LAYOUT_MIN_MS || 500, CONFIG.COMPANY_LAYOUT_MAX_MS || 1500));   // 布置完停一下再开扫（0.5~1.5 秒）
+      await turnGate(); u.actions++; if (stop()) return { located, pages: 0 };   // 读第 1 页也算一个行为，过全局闸
+      let res = await askTab(slot.tabId, MSG.COMPANY_DOM_PAGE, { turnFirst: false }).catch(() => ({ jobs: [], hasNext: false }));
+      slot.lastNew = absorb(slot, res); slot.page = 1; slot.lastHasNext = !!res.hasNext;
+      live[t.company] = slot.page; report(slot, q);
+      while (!kwExhausted(slot) && !stop() && u.actions < u.cap) {
+        await turnGate(); u.actions++;   // 翻一页 = 一个行为，全局每 3~4 秒才放行一个
         if (stop()) break;
-        if (slot.companySeen.size >= perCompanyCap) break;   // 这家已收够，剩下的岗位词不用再搜
-        const q = queries[slot.kwi] || '';
-        slot.page = 0; slot.seen = new Set(); slot.maxPages = pagesCap();
-        if (q) { await askTab(slot.tabId, MSG.COMPANY_BOX_SEARCH, { keyword: q }).catch(() => {}); await U.sleep(800); }
-        await turnGate(); if (stop()) break;   // 读第 1 页也算一个行为，过全局闸
-        let res = await askTab(slot.tabId, MSG.COMPANY_DOM_PAGE, { turnFirst: false }).catch(() => ({ jobs: [], hasNext: false }));
-        slot.lastNew = absorb(slot, res); slot.page = 1; slot.lastHasNext = !!res.hasNext;
-        live[t.company] = pagesTotal + slot.page; report(slot, q);
-        while (!kwExhausted(slot) && !stop()) {
-          await turnGate();   // 翻一页 = 一个行为，全局每 4~6 秒才放行一个
-          if (stop()) break;
-          res = await askTab(slot.tabId, MSG.COMPANY_DOM_PAGE, { turnFirst: true }).catch(() => ({ jobs: [], hasNext: false, turned: false }));
-          slot.page++;
-          slot.lastNew = absorb(slot, res);
-          slot.lastHasNext = res.turned === false ? false : !!res.hasNext;
-          live[t.company] = pagesTotal + slot.page; report(slot, q);
-        }
-        pagesTotal += slot.page;
-        diag.push({ company: slot.company, keyword: q || '全部', got: slot.seen.size, source: 'dom-parallel' });
+        res = await askTab(slot.tabId, MSG.COMPANY_DOM_PAGE, { turnFirst: true }).catch(() => ({ jobs: [], hasNext: false, turned: false }));
+        slot.page++;
+        slot.lastNew = absorb(slot, res);
+        slot.lastHasNext = res.turned === false ? false : !!res.hasNext;
+        live[t.company] = slot.page; report(slot, q);
       }
-      return { located, pages: pagesTotal };
+      if (u.actions >= u.cap && !kwExhausted(slot)) {
+        diag.push({ company: t.company, step: `单元行为份额用完(${u.cap}个)：${u.city || '全国'} ${q || '全部'}` });
+      }
+      diag.push({ company: slot.company, keyword: (q || '全部') + (u.city ? '@' + u.city : ''), got: slot.seen.size, source: 'dom-parallel' });
+      return { located, pages: slot.page };
     } catch (e) {
       diag.push({ company: t.company, step: '采集异常:' + String(e.message || e).slice(0, 24) });
-      return { located, pages: pagesTotal };
+      return { located, pages: 0 };
     } finally {
       closeSlot(slot);
       activeCount = Math.max(0, activeCount - 1);
     }
   };
 
-  // 一家公司：跑一次；若这一轮用的行为数 ≤ 4（太快，多半只收到 1 页/定位错）就重做，
-  // 并把全局行为预算 +10 给重做腾空间，每家最多重做 3 遍。
-  const processCompany = async (t) => {
+  // 一个单元（公司×城市×词）跑一遍。没定位到的单元重做（用户 2026-10-08 定）：
+  // 最多重做 3 次，每次重做总剩余行为数 +10（actionsBudget 与这个单元的 cap 各 +10，
+  // 这份额外预算留给重做的单元用）。定位成功/已定位但提前收工的单元不重做，
+  // 省下的份额照常在下方回流给未完单元。
+  const processUnit = async (u) => {
     if (stop()) return;
-    statuses[t.company] = 'locating';
+    const t = u.t;
     const tStart = Date.now();
-    let located = false, pages = 0, redos = 0;
-    while (!stop()) {
-      const before = actionsDone;
-      const r = await onePass(t);
-      const passActions = actionsDone - before;
-      located = located || r.located;
-      pages = Math.max(pages, r.pages);
-      if (passActions <= 4 && redos < 3 && !stop()) {   // 4 个行为内就完成 → 重做
-        redos++;
-        actionsBudget += 10;   // 剩余行为数 +10，给重做腾空间
-        continue;
-      }
-      break;
+    let r = await onePass(u);
+    // 网址失效不在这层处理（2026-10-08 用户改定）：onePass 里报错后已回退搜索流程兜底，
+    // 搜得到就照常跑，搜不到才按普通「没定位到」进下面的重做。
+    for (let retry = 1; retry <= 3 && !r.located && !stop(); retry++) {
+      actionsBudget += 10;   // 总剩余行为数 +10（用户 2026-10-08 定）
+      u.cap += 10;           // 这 +10 给这个重做的单元自己用（定位成功后可多翻页）
+      diag.push({ company: t.company, step: `没定位到，第${retry}次重做（总预算+10）` });
+      console.log('[闪投] 没定位到，重做', retry, '/', 3, t.company);
+      await U.sleep(U.randInt(1000, 2000));   // 隔 1~2 秒再来，跟人重试一样（2026-10-08 用户由 1~3 收紧）
+      if (stop()) break;
+      r = await onePass(u);
     }
-    if (located) { statuses[t.company] = 'done'; }
-    else { statuses[t.company] = 'miss'; if (!brandMiss.includes(t.company)) brandMiss.push(t.company); console.log('[闪投] 没定位到', t.company); diag.push({ company: t.company, step: '没定位到' }); }
-    unitDone += Math.max(1, queries.length);
-    // 没被停止/到闸且定位成功 = 这家完整跑完，记进断点；没定位到（miss）的不记，
-    // 恢复搜索时给它再定位一次的机会（可能是网络波动）。
-    if (!stop() && located) doneCompanies.push(t.company);
+    unitDone++;
+    locatedBy[t.company] = locatedBy[t.company] || r.located;
+    remainBy[t.company] = Math.max(0, (remainBy[t.company] || 1) - 1);
+    if (remainBy[t.company] === 0) {   // 这家公司的全部单元都跑完了才落终态（面板按公司展示）
+      if (locatedBy[t.company]) { statuses[t.company] = 'done'; }
+      else {
+        statuses[t.company] = 'miss';
+        if (!brandMiss.includes(t.company)) brandMiss.push(t.company);
+        console.log('[闪投] 没定位到', t.company); diag.push({ company: t.company, step: '没定位到' });
+      }
+    }
+    // 指标按公司累计（跨单元）：用时/页数累加，count 取该公司当前在库岗位数
     const count = [...merged.values()].filter((j) => j.companyName === t.company).length;
-    stats[t.company] = { ms: Date.now() - tStart, count, pages };
+    const prev = stats[t.company] || { ms: 0, count: 0, pages: 0 };
+    stats[t.company] = { ms: prev.ms + (Date.now() - tStart), count, pages: (prev.pages || 0) + (r.pages || 0) };
+    // ── 剩余份额回流（用户 2026-10-08 定）──
+    // 这个单元提前收工（词翻完/页数到/没定位到）没花完的份额 + 池里攒的零头，平分给
+    // 还没跑完的单元（正在跑的 + 还在排队的），正在翻页的单元下一轮判断立即按新份额走。
+    // 不变式：所有单元的 cap 之和 ≤ actionsBudget，总预算不会超。
+    u._done = true;
+    const leftover = Math.max(0, u.cap - (u.actions || 0));
+    if (leftover > 0) bonusPool += leftover;
+    const unfinished = units.filter((x) => !x._done);
+    if (unfinished.length && bonusPool > 0) {
+      const add = Math.floor(bonusPool / unfinished.length);
+      if (add > 0) {
+        for (const x of unfinished) x.cap += add;
+        bonusPool -= add * unfinished.length;   // 除不尽的零头留在池里，等下一个单元收工再分
+        diag.push({ company: t.company, step: `份额回流：剩${leftover}个平分给${unfinished.length}个未完单元(各+${add})` });
+      }
+    }
     if (onProgress) onProgress({ company: t.company, keyword: '', unitDone, unitTotal, collected: merged.size, misses: brandMiss.slice(), statuses: { ...statuses }, stats: { ...stats }, actionsDone, actionsBudget });
   };
 
-  // 并行池：最多 P 个分页同时一条龙，一个收完就从队列拉下一家顶上
-  const queue = targets.slice();
-  const worker = async () => { while (queue.length && !stop()) { const t = queue.shift(); if (t) await processCompany(t); } };
+  // 并行池：最多 8 个分页同时一条龙，一个收完就从队列拉下一个单元顶上
+  const queue = units.slice();
+  const worker = async () => { while (queue.length && !stop()) { const u = queue.shift(); if (u) await processUnit(u); } };
   await Promise.all(Array.from({ length: P }, () => worker()));
   return added;
 }
@@ -874,19 +1027,6 @@ async function navigateAndWait(tabId, url) {
  * 公司维度刻意不进这个乘积（技术方案 3.2），勾多少家公司都不增加请求量，
  * 公司过滤放在本地做。
  */
-// ── 搜索断点（需求 #11：手动停止后「恢复搜索」）──
-// 断点内容：条件快照 + 已完成单元（海投="cityCode|kw"，精投=公司名）+ 当时已收数量。
-// 恢复 = 跳过已完成单元续跑，预算重新给一轮（用户 2026-10-07 拍的口径 1）。
-async function saveSearchCheckpoint(cp) {
-  await chrome.storage.local.set({ [STORE.SW.SEARCH_CHECKPOINT]: cp }).catch(() => {});
-}
-async function loadSearchCheckpoint() {
-  const st = await chrome.storage.local.get(STORE.SW.SEARCH_CHECKPOINT).catch(() => ({}));
-  return st[STORE.SW.SEARCH_CHECKPOINT] || null;
-}
-async function clearSearchCheckpoint() {
-  await chrome.storage.local.remove(STORE.SW.SEARCH_CHECKPOINT).catch(() => {});
-}
 
 async function runRecall(config = {}) {
   // 允许 aborted：用户点「停止」后后台虽还在卸载，但应能立刻开新一轮，不卡「任务进行中」
@@ -894,6 +1034,12 @@ async function runRecall(config = {}) {
     throw new Error('task_already_running');
   }
   state.stopRequested = false;   // 新一轮搜索，清掉上次的停止标志
+
+  // OCR 与搜索同时做（2026-10-08 用户定）：搜索一开始就在后台预热简历识别，
+  // 搜索要跑几分钟、识别最多 60 秒，等用户点生成时文字早就备好。
+  // 刻意不 await、不阻塞搜索；失败静默（生成时 ensureResumeText 会再试）；
+  // 与点生成同时触发时的并发去重由 ensureResumeText 内部处理。
+  ensureResumeText().catch(() => {});
 
   state.task = {
     taskId: newTaskId(),
@@ -948,9 +1094,9 @@ async function runRecall(config = {}) {
     let lastStop = 'exhausted';
 
     // 精投不再全网搜公司名（那是全文检索，必带别家公司）。它走「公司→岗位→地点」：
-    // 直接解析 brandId → 翻公司主页 → 职位类型+城市筛，全部在 augmentFromCompanyPages 里做。
+    // 真人链路进公司招聘职位页（首页搜公司→点卡→核对→招聘职位），全部在 augmentFromCompanyPages 里做。
     // 海投 v2 走真人链路：主页→搜索框→筛选→滚动读卡，在 runHaitouScroll 里做。
-    let htResult = null;   // 海投结果（含 doneUnits，搜索断点用）；精投为 null
+    let htResult = null;   // 海投结果（actionsDone/perCity）；精投为 null
     if (mode === 'position') {
       htResult = await runHaitouScroll(config, merged, (p) => {
         setPhase('collecting', {
@@ -1014,6 +1160,25 @@ async function runRecall(config = {}) {
         jobs = jobs.filter(matchCity);
         funnel.cityCut = before - jobs.length;
       }
+    }
+
+    // ── 精投本地过滤：只留薪资（2026-10-08 用户定）──
+    // 经验/学历是安慰剂（用户 2026-10-08 定：「先让用户能选，但不影响搜索」）——
+    // 选项照选，不进 URL、不在本地筛、对结果零影响。薪资多选时 URL 放不下，
+    // 这里按用户所选在本地筛一道。卡片没抓到标签的、写「不限」的、薪资面议的
+    // 一律保留（宁可多给）；筛完归零 → 放弃该维，别让用户空手。
+    if (mode === 'company') {
+      const fl = config.filterLabels || {};
+      const localCut = {};
+      const applyLocal = (name, labels, pred) => {
+        if (!labels.length || !jobs.length) return;
+        const before = jobs.length;
+        const kept = jobs.filter(pred);
+        if (kept.length) { localCut[name] = before - kept.length; jobs = kept; }
+        else localCut[name + 'Skipped'] = true;
+      };
+      applyLocal('salary', fl.salary || [], (j) => matchSalary(j, fl.salary || []));
+      if (Object.keys(localCut).length) funnel.localFilterCut = localCut;
     }
 
     // ── 岗位名过滤（本地兜底）──
@@ -1112,25 +1277,6 @@ async function runRecall(config = {}) {
     funnel.dupFp = dupFp;
     await Repo.putJobs(jobs);
 
-    // ── 搜索断点（需求 #11：手动停止后可「恢复搜索」，不用从头来）──
-    // 用户手动停止（stopRequested）→ 条件快照 + 已完成单元落盘，恢复时跳过已完成单元、
-    // 预算重新给一轮（2026-10-07 用户拍的口径 1）；正常跑完（含到闸自停）→ 清掉断点。
-    if (state.stopRequested) {
-      const newDone = mode === 'company'
-        ? (augmentFromCompanyPages._doneCompanies || [])
-        : ((htResult && htResult.doneUnits) || []);
-      const cleanConfig = { ...config };
-      delete cleanConfig._skipUnits; delete cleanConfig._skipCompanies; delete cleanConfig._doneSoFar;
-      await saveSearchCheckpoint({
-        savedAt: Date.now(), mode, config: cleanConfig,
-        doneUnits: [...(config._doneSoFar || []), ...newDone],
-        jobCount: jobs.length,
-      });
-      console.log('[闪投] 搜索断点已存：已完成单元', (config._doneSoFar || []).length, '+', newDone.length);
-    } else {
-      await clearSearchCheckpoint();
-    }
-
     setPhase('done', {
       finishedAt: Date.now(),
       stoppedBy: res.stoppedBy,
@@ -1205,15 +1351,41 @@ async function runGreeting(jobIds, opts) {
   }
 }
 
+/**
+ * 简历文字按需取（2026-10-08 用户定：OCR 放在搜索之后做）。
+ * 上传时只存图不识别；走到真正要用文字的环节（生成招呼语/推荐岗位词）才识别：
+ *   - 文字已有 → 直接用（图没变不重复花钱）
+ *   - 文字空但图在 → 当场 OCR 一次（≤60 秒）并存储，下次直接用
+ *   - OCR 失败 → 异常原样抛出，不缓存失败状态，下次自动再试
+ *   - 连图都没有 → 返回空串，由调用方决定怎么提示
+ */
+async function ensureResumeText() {
+  // 并发去重：搜索开始的预热和用户点生成可能同时触发，只跑一次识别；
+  // 失败后清掉挂起的 Promise，下次调用自动重试。
+  if (ensureResumeText._p) return ensureResumeText._p;
+  const run = (async () => {
+    const st = await chrome.storage.local.get([STORE.SW.RESUME_TEXT, STORE.SW.RESUME_IMAGES]);
+    if (st[STORE.SW.RESUME_TEXT]) return st[STORE.SW.RESUME_TEXT];
+    const images = st[STORE.SW.RESUME_IMAGES] || [];
+    if (!images.length) return '';
+    const text = await LLM.ocrResume(images.map((i) => i.dataUrl));
+    await chrome.storage.local.set({ [STORE.SW.RESUME_TEXT]: text });
+    return text;
+  })();
+  ensureResumeText._p = run;
+  try { return await run; } finally { ensureResumeText._p = null; }
+}
+
 async function doGreeting(jobIds, opts = {}) {
   state.stopRequested = false;   // 新一轮生成，清掉上次的停止标志
   const mode = opts.mode || 'ai';          // ai | custom
   const globalGreet = (opts.globalGreet || '').trim();
   const jobGreet = opts.jobGreet || {};
 
-  const st = await chrome.storage.local.get(STORE.SW.RESUME_TEXT);
-  const resumeText = st[STORE.SW.RESUME_TEXT] || '';
-  // AI 模式才需要简历；自定义模式直接用现成文案，不必拦
+  // 简历文字按需取（2026-10-08 用户定：OCR 放在搜索之后做）。这里在
+  // AI 模式才识别（自定义模式直接用现成文案，不必拦）；放在看门狗启动
+  // 之前调，识别最长 60 秒，不能被 30 秒看门狗误杀。
+  const resumeText = mode === 'ai' ? await ensureResumeText() : '';
   if (mode === 'ai' && !resumeText) throw new Error('还没有简历内容，先在上一步传简历截图');
 
   const jobs = [];
@@ -1258,6 +1430,8 @@ async function doGreeting(jobIds, opts = {}) {
       };
       job.state = JOB_STATE.GREETED;
       await Repo.putJob(job);
+      // 埋点：自定义招呼语，1 份算 1 次
+      if (typeof Tracker !== 'undefined') Tracker.track('greeting_custom', { via: perJob ? 'job' : 'global' });
       emit(job);
     } else {
       aiJobs.push(job);
@@ -1268,7 +1442,12 @@ async function doGreeting(jobIds, opts = {}) {
   //    之前是逐个「导航开页面→等加载→读 JD→生成」串行，81 个要好几分钟。
   //    改成后台抓 JD + 多个岗位同时生成，快数倍。JD 走详情页 HTML（不是被严格
   //    限流的 joblist 接口），并发抓风险低。
-  const tabId = aiJobs.length ? await ensureBossTab() : null;
+  // 2026-10-08：ensureBossTab 整体再加一道 30 秒兜底（ping 已带 5 秒超时，这里防
+  // 重载/注入链里任何一环再出意外）。拿不到标签页不致命——跳过抓 JD 照样生成，
+  // 招呼语里少引用 JD 细节而已，绝不能再让生成整批无声卡死。
+  const tabId = aiJobs.length
+    ? await U.withTimeout(ensureBossTab(), CONFIG.TAB_ENSURE_TIMEOUT_MS || 30000, 'ensure_boss_tab_timeout').catch(() => null)
+    : null;
   const queue = [...aiJobs];
   const conc = Math.min(CONFIG.GREETING_CONCURRENCY || 5, Math.max(1, aiJobs.length));
 
@@ -1279,7 +1458,8 @@ async function doGreeting(jobIds, opts = {}) {
 
       // 抓 JD（后台 HTML 抓取，不导航、不抢焦点；带超时——这段以前无超时，
       // 被风控挂起时所有 worker 一起卡死，面板永远停在 0/N）
-      if (!job.jdText) {
+      // tabId 为 null（ensureBossTab 超时降级）时直接跳过抓 JD，照样生成
+      if (!job.jdText && tabId) {
         try {
           const r = await askTab(tabId, MSG.FETCH_JD, { jobId: job.jobId, securityId: job.securityId },
             CONFIG.JD_FETCH_TIMEOUT_MS || 20000);
@@ -1296,6 +1476,8 @@ async function doGreeting(jobIds, opts = {}) {
       try {
         job.greeting = await LLM.writeGreeting({ resumeText, job, jdText: job.jdText, score: job.score });
         job.state = JOB_STATE.GREETED;
+        // 埋点：AI 招呼语生成成功，1 份算 1 次（fallback 不计）
+        if (typeof Tracker !== 'undefined') Tracker.track('greeting_gen');
       } catch (e) {
         const msg = String(e.message || e);
         job.greeting = { text: FALLBACK_GREETING, source: 'fallback', error: msg, generatedAt: Date.now() };
@@ -1410,7 +1592,8 @@ async function doSend(jobIds) {
   const allow = Math.min(batch, daily, jobIds.length);
   if (allow <= 0) throw new Error('今天的投递额度已经用完了');
 
-  const tabId = await ensureBossTab();   // 后台投递，不抢焦点
+  // 后台投递，不抢焦点。30 秒兜底：标签页卡死时报错收场，不再无声挂起（2026-10-08 坑）
+  const tabId = await U.withTimeout(ensureBossTab(), CONFIG.TAB_ENSURE_TIMEOUT_MS || 30000, 'ensure_boss_tab_timeout');
 
   // 关掉 BOSS 自带招呼语，结束后恢复
   let originalSwitch = null;
@@ -1498,6 +1681,8 @@ async function doSend(jobIds) {
         };
         job.state = JOB_STATE.SENT;
         await Repo.putJob(job);
+        // 埋点：确认发出才算投递成功 1 份（与 send_click「点了按钮」区分，可算转化率）
+        if (typeof Tracker !== 'undefined') Tracker.track('deliver');
         if (job.hrId) await Repo.touchHr(job.hrId, job.companyId);
         // 招呼语发出去了，但图片没发全，如实标注
         const imgNote = imgTotal && (r.images || 0) < imgTotal
@@ -1598,42 +1783,14 @@ const ROUTES = {
   // Promise 就被判「message channel closed」，面板直接显示「出错了」，可后台其实
   // 还在跑。改成立刻返回，进度/收尾全靠 TASK_PROGRESS 广播（done/error 已在
   // runRecall 内 setPhase+broadcast），面板重开也能用 GET_TASK 补当前状态。
-  [MSG.START_RECALL]: (payload) => {
-    runRecall(payload || {}).catch((e) => {
-      setPhase('error', { error: String(e.message || e) });
-    });
-    return { ok: true, started: true };
-  },
-
-  // 恢复搜索（需求 #11）：读断点 → 用断点里的条件快照续跑，跳过已完成单元。
-  // 发令即返回（同 START_RECALL），进度/收尾全走 TASK_PROGRESS 广播。
-  [MSG.RESUME_RECALL]: async () => {
-    const cp = await loadSearchCheckpoint();
-    if (!cp || !cp.config) return { ok: false, error: 'no_checkpoint' };
-    const config = { ...cp.config, _doneSoFar: cp.doneUnits || [] };
-    if (cp.mode === 'company') config._skipCompanies = new Set(cp.doneUnits || []);
-    else config._skipUnits = new Set(cp.doneUnits || []);
+  [MSG.START_RECALL]: async (payload) => {
+    // 每次都是全新搜索（2026-10-08 用户定：恢复搜索整个功能取消，不再比对条件、
+    // 不再有断点/跳过已完成单元，点了「开始搜索」就从头上跑一轮）。
+    const config = payload || {};
     runRecall(config).catch((e) => {
       setPhase('error', { error: String(e.message || e) });
     });
     return { ok: true, started: true };
-  },
-
-  // 面板查断点（决定要不要显示「恢复搜索」按钮）：只回展示用字段，不回整个条件快照
-  [MSG.GET_SEARCH_CHECKPOINT]: async () => {
-    const cp = await loadSearchCheckpoint();
-    return {
-      ok: true,
-      checkpoint: cp ? {
-        savedAt: cp.savedAt, mode: cp.mode,
-        doneCount: (cp.doneUnits || []).length, jobCount: cp.jobCount || 0,
-      } : null,
-    };
-  },
-
-  [MSG.CLEAR_SEARCH_CHECKPOINT]: async () => {
-    await clearSearchCheckpoint();
-    return { ok: true };
   },
 
   // 岗位词语义归类（LLM 兜底）：把字符串匹配不上的怪词交给模型，
@@ -1726,16 +1883,19 @@ const ROUTES = {
     if (!job) return { ok: false, error: 'job_not_found' };
 
     if (payload.regenerate) {
-      const st = await chrome.storage.local.get(STORE.SW.RESUME_TEXT);
       const prev = job.greeting?.text;
       job.greeting = await LLM.writeGreeting({
-        resumeText: st[STORE.SW.RESUME_TEXT] || '', job, jdText: job.jdText, score: job.score,
+        resumeText: await ensureResumeText(), job, jdText: job.jdText, score: job.score,
       });
       // 保留历史版本，这是「什么样的招呼语是好的」最直接的训练信号
       job.greeting.history = [...(payload.history || []), prev].filter(Boolean);
       job.greeting.source = 'ai_regenerated';
+      // 埋点：重新生成也算 1 份
+      if (typeof Tracker !== 'undefined') Tracker.track('greeting_gen', { via: 'regenerate' });
     } else {
       job.greeting = { ...(job.greeting || {}), text: payload.text, source: 'manual_edited' };
+      // 埋点：手动改文案也算自定义招呼语 1 份
+      if (typeof Tracker !== 'undefined') Tracker.track('greeting_custom', { via: 'manual_edit' });
     }
     await Repo.putJob(job);
     return { ok: true, greeting: job.greeting };
@@ -1768,13 +1928,11 @@ const ROUTES = {
   [MSG.SAVE_RESUME_IMAGES]: async (payload) => {
     const images = (payload.images || []).slice(0, CONFIG.RESUME_IMAGE_MAX);
     await chrome.storage.local.set({ [STORE.SW.RESUME_IMAGES]: images });
-    if (!images.length) {
-      await chrome.storage.local.set({ [STORE.SW.RESUME_TEXT]: '' });
-      return { ok: true, text: '' };
-    }
-    const text = await LLM.ocrResume(images.map((i) => i.dataUrl));
-    await chrome.storage.local.set({ [STORE.SW.RESUME_TEXT]: text });
-    return { ok: true, text };
+    // OCR 不在上传时跑（2026-10-08 用户定：放在搜索之后要用文字时自动做）。
+    // 换图必须清掉旧文字——宁可空着等下次自动识别，也不能拿旧简历的文字
+    // 冒充新简历去生成。
+    await chrome.storage.local.set({ [STORE.SW.RESUME_TEXT]: '' });
+    return { ok: true, text: '' };
   },
 
   /**
@@ -1782,8 +1940,9 @@ const ROUTES = {
    * 结果缓存在 storage 里，简历没变就不重复调模型。
    */
   [MSG.SUGGEST_POSITIONS]: async () => {
-    const st = await chrome.storage.local.get([STORE.SW.RESUME_TEXT, 'sw:suggestedPositions']);
-    const text = st[STORE.SW.RESUME_TEXT] || '';
+    // 简历文字按需取：没有就当场识别（第一次点推荐会先读简历，最多等 1 分钟）
+    const st = await chrome.storage.local.get('sw:suggestedPositions');
+    const text = await ensureResumeText();
     if (!text) return { ok: true, positions: [] };
 
     const cache = st['sw:suggestedPositions'];

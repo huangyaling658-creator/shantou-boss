@@ -49,10 +49,20 @@
       return { ok: true, brands };
     },
 
-    [MSG.READ_BRAND_DOM]: async (payload) => Collector.readBrandFromSearchDom(payload && payload.names),
+    // 精投真人链路（2026-10-08 用户定的链路）：结果页点卡 → 核对页头 → 点招聘职位 → 列表就绪/搜索框补填
+    [MSG.COMPANY_CLICK_CARD]: async (payload = {}) => Collector.clickCompanyCard(payload),
+    [MSG.READ_COMPANY_HEADER]: async () => Collector.readCompanyHeader(),
+    [MSG.COMPANY_CLICK_JOBS_TAB]: async () => Collector.clickCompanyJobsTab(),
+    [MSG.COMPANY_JOBS_READY]: async () => Collector.companyJobsReady(),
+    [MSG.COMPANY_BOX_ENSURE]: async (payload = {}) => Collector.companyBoxEnsure(payload.keyword || ''),
 
     [MSG.COMPANY_BOX_SEARCH]: async (payload) => {
       return await Collector.driveCompanyBoxSearch(payload.keyword || '');
+    },
+
+    // 精投布置：点公司页筛选下拉（工作城市/工作经验/学历要求/薪资待遇）
+    [MSG.COMPANY_APPLY_FILTERS]: async (payload = {}) => {
+      return await Collector.applyCompanyFilters(payload);
     },
 
     [MSG.COMPANY_DOM_COLLECT]: async (payload = {}) => {

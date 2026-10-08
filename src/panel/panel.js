@@ -85,7 +85,6 @@ const S = {
   jobGreet: {},
   refineTerms: [],       // [{term, on}] 结果页按「用户选定的岗位」分桶筛选，点亮=显示该桶
   searchDetailOpen: false, // 「搜索过程与结果」折叠区，默认折叠
-  searchOverrides: {},   // 用户手动改过的「搜寻名」（公司名→中文搜寻名），下次搜这家用它去定位
   brandOverrides: {},    // 用户贴公司主页网址抽出的 brandId（公司名→brandId），最优先、跳过定位
   searchMinutes: (typeof CONFIG !== 'undefined' && CONFIG.DEFAULT_SEARCH_MINUTES) || 5,  // 固定安全时间上限，不再给用户调
 };
@@ -325,9 +324,9 @@ function fileToDataUrl(file) {
 }
 
 /**
- * 存图并在后台识别。
- * 刻意不 await、不禁用任何按钮：识别是我们的事，用户传完图就该能继续往下选。
- * 识别结果要到生成打招呼语那一步才真正需要，那时候早跑完了。
+ * 存图（2026-10-08 用户定：OCR 放在搜索之后做）。
+ * 上传只存图、秒存秒走，不在这一步识别；识别挪到真正要用文字的环节
+ * （生成打招呼语 / 推荐岗位词）自动做，识别失败下次自动再试，不会死锁。
  */
 function saveResume() {
   renderUploads();
@@ -335,21 +334,16 @@ function saveResume() {
   if (!S.resumeImages.length) {
     S.resumeText = '';
     ask(MSG.SAVE_RESUME_IMAGES, { images: [] }).catch(() => {});
+    $set('ocr-status', '未上传简历');
     return;
   }
 
-  $set('ocr-status', '正在读取简历…');
-
   ask(MSG.SAVE_RESUME_IMAGES, { images: S.resumeImages })
-    .then((r) => {
-      S.resumeText = r.text || '';
-      $set('ocr-status', `已读取 ${S.resumeText.length} 字`);
-      if (S.resumeText.length < 200) {
-        $set('ocr-status', ($('ocr-status')?.textContent || '') + '，内容偏少，建议换清晰完整的截图');
-      }
-      loadRecommendedPositions();
+    .then(() => {
+      S.resumeText = '';
+      $set('ocr-status', `已保存 ${S.resumeImages.length} 张，生成时自动读取文字`);
     })
-    .catch((e) => { $set('ocr-status', `读取失败：${e.message}`); });
+    .catch((e) => { $set('ocr-status', `保存失败：${e.message}`); });
 }
 
 // ════════════════════════════════════════════════════════════
@@ -403,8 +397,8 @@ function renderCompanies(q = '') {
   }
 
   // 搜不到内置库里的公司？直接把用户输入的名字加进去当目标公司。
-  // 不需要外接搜索接口：投递时会拿这个名字去 BOSS 自己的搜索里反查 brandId
-  // （见 service-worker 的 resolveBrandId），和内置公司走的是同一条路。
+  // 不需要外接搜索接口：投递时会拿这个名字走首页搜索→点卡片进公司页的真人链路
+  // （见 service-worker 的 augmentFromCompanyPages），和内置公司走的是同一条路。
   const raw = q.trim();
   if (raw) {
     const dup = S.companies.some((x) => x.name === raw)
@@ -776,6 +770,11 @@ function renderFilters() {
   let deadKeys = [];
 
   for (const f of FILTER_SECTIONS) {
+    // 精投只布置四项（用户 2026-10-08 定）：工作城市（目标城市区承担）/工作经验/
+    // 学历要求/薪资待遇。工作区域/求职类型/公司行业/公司规模/融资阶段在公司页
+    // 布置不了也不本地筛，精投一律隐去；海投照展。
+    if (S.searchMode === 'company'
+      && ['industry', 'scale', 'stage', 'businessDistrict', 'jobType'].includes(f.key)) continue;
     // 公司行业是两级：一级铺在外面，点开一级在下面卡片里展二级（对齐即投）
     if (f.key === 'industry') { area.appendChild(renderIndustry()); continue; }
 
@@ -915,6 +914,7 @@ function renderMode() {
     ? ['sec-company', 'sec-position', 'sec-city']
     : ['sec-position', 'sec-city', 'sec-company'];
   for (const id of order) parent.insertBefore($(id), anchor);
+  renderFilters();   // 精投/海投的筛选区不一样（精投隐去行业/规模/融资），切模式要重画
   updateAction();
 }
 document.querySelectorAll('#search-mode .pill').forEach((p) => {
@@ -931,20 +931,22 @@ document.querySelectorAll('#search-mode .pill').forEach((p) => {
 // ════════════════════════════════════════════════════════════
 
 // ── 精投耗时预估 ──
-// 一个「公司×词」是一个单位。单位内翻 8~10 页、每页 4~6 秒 + 固定开销。
-// 单元数 = 公司数 × max(词数,1)。总时长按单元算，供开搜前预告 + 搜索中倒推。
+// 一个「公司×城市×词」是一个单元=一个分页（用户 2026-10-08 定）。单元内翻几页、
+// 每页过一次全局冷却闸 + 固定开销。总时长按单元算，供开搜前预告 + 搜索中倒推。
 // 按「全局冷却队列」模型估时：翻页是全局串行的(每次翻页前过一个随机冷却闸)，
 // 所以总翻页耗时 = 总翻页数 × 冷却均值，【不除以并行数】。第 1 页不占冷却。
-// brandId 解析是每家串行的固定开销。翻页数用现实区间(非硬上限 15)，免得吓人。
+// brandId 解析是每家串行的固定开销（同一家多单元只定位一次）。翻页数用现实区间，免得吓人。
 const EST = {
   perCompanyOverheadSec: 12,   // 每家 brandId 解析 + 开页搜词的固定开销
-  estPagesMin: 3,              // 预估每「公司×词」翻几页（现实区间）
+  estPagesMin: 3,              // 预估每单元翻几页（现实区间；行为预算平分后小单元多在低位）
   estPagesMax: 10,
 };
 function estimateUnits() {
   const companies = S.companies.length;
   const words = Math.max(S.positions.length, 1);
-  return companies * words;
+  // 城市数：全国/没选城市算 1 个单元维度（2026-10-08 定：分页数=公司×城市×词）
+  const cities = S.cities.filter((c) => (c.name || c.label) !== '全国').length || 1;
+  return companies * cities * words;
 }
 function estimateRangeSec() {
   const companies = S.companies.length;
@@ -981,7 +983,7 @@ function renderEtaHint() {
 function updateAction() {
   const btn = $('btn-action');
   const reset = $('btn-reset');
-  refreshResumeSearchBtn();   // 恢复搜索按钮（需求 #11）：内部异步查断点，忙时直接藏
+  // 恢复搜索功能已取消（2026-10-08 用户定）：每次点「开始搜索」都是全新一轮。
   if (S.busy || S.sending) return;   // 投递进行中/暂停中由 enterSendingBar 管按钮
 
   reset.hidden = false;
@@ -1028,8 +1030,11 @@ function updateAction() {
 }
 
 $('btn-reset').addEventListener('click', () => {
-  // 按钮写「停止」时（搜索进行中）：只停止，不清结果、不跳屏。
-  if ($('btn-reset').textContent === '停止') { stopSearch(); return; }
+  // 按钮写「停止」时：只停止，不清结果、不跳屏。生成中与搜索中分流（用户 2026-10-08 定）。
+  if ($('btn-reset').textContent === '停止') {
+    if (S.greeting) stopGreeting(); else stopSearch();
+    return;
+  }
   // 投递完成后的「重置」= 彻底清空（连筛选条件一起），从空白开始。
   if (S.screen === 'send') { fullReset(); return; }
   if (S.screen !== 'config') { showScreen('config'); return; }
@@ -1058,63 +1063,35 @@ function stopSearch() {
   toast('已停止');
 }
 
-// ── 恢复搜索（需求 #11）──
-// 手动停止后 SW 会把断点（条件快照+已完成单元）落盘；有断点且不在忙就显示「恢复搜索」。
-// 点续跑：跳过已完成单元，预算重新给一轮（2026-10-07 用户拍的口径 1）。
-let resumeBtnReqSeq = 0;
-async function refreshResumeSearchBtn() {
-  const btn = $('btn-resume-search');
-  if (!btn) return;
-  if (S.busy || S.sending) { btn.hidden = true; return; }
-  const seq = ++resumeBtnReqSeq;
-  let cp = null;
-  try { const r = await ask(MSG.GET_SEARCH_CHECKPOINT); cp = r.checkpoint || null; }
-  catch (e) { /* SW 没醒就当没断点 */ }
-  if (seq !== resumeBtnReqSeq) return;   // 期间又刷了一次，旧响应别覆盖新状态
-  btn.hidden = !cp;
-  if (cp) btn.textContent = `恢复搜索（接着上次停止处 · 已完成${cp.doneCount}个单元）`;
+/**
+ * 生成中点「停止」（用户 2026-10-08 定）：停掉招呼语生成。
+ * 后台 worker 循环本来就查 stopRequested，会陆续退出；卡住的步骤有各自超时兜底。
+ * 已生成的每条都实时填进了卡片，停了不丢；空格子留着，再点「生成打招呼语」接着补。
+ * 迟到的 greeting_done 广播只负责清沙漏态和刷新按钮，不会把已停的状态翻回去。
+ */
+function stopGreeting() {
+  ask(MSG.STOP_TASK).catch(() => {});   // 同一个停止令，doGreeting 的 worker 会认
+  S.busy = false;
+  S.greeting = false;
+  S.pendingSendAfterGreet = false;      // 自定义模式的「生成完直接投递」连锁也一起取消
+  for (const el of document.querySelectorAll('#job-list .jcard.generating')) {
+    el.classList.remove('generating');
+    const ta = el.querySelector('.jgreet');
+    if (ta && !ta.value) ta.placeholder = '（已停止，可再点生成）';
+  }
+  $('btn-reset').textContent = '重置';
+  updateAction();
+  toast('已停止，已生成的招呼语保留在卡片里');
 }
 
-$('btn-resume-search').addEventListener('click', async () => {
-  if (S.busy || S.sending) return;
-  // 界面起步与 runSearch 同款（进度条/计时/停止钮），只是发令走 RESUME_RECALL
-  S.busy = true;
-  S.searchStopped = false;
-  showScreen('result');
-  startSearchTimer();
-  $('search-progress').hidden = false;
-  $('funnel').hidden = true; $('funnel').innerHTML = '';
-  $('company-status').innerHTML = '';
-  $('login-warn').hidden = true;
-  S.searchDetailOpen = true; updateSearchDetailSec();
-  $('job-list').innerHTML = '';
-  $('result-body').hidden = true;
-  $('search-empty').hidden = true;
-  $('btn-resume-search').hidden = true;
-  $('btn-action').disabled = true;
-  $('btn-action').textContent = '搜索中…';
-  $('btn-reset').textContent = '停止';
-  try {
-    const r = await ask(MSG.RESUME_RECALL);
-    if (!r.ok) throw new Error(r.error === 'no_checkpoint' ? '断点不存在，请重新搜索' : (r.error || '恢复失败'));
-    toast('已从上次停止处继续搜索');
-  } catch (e) {
-    S.busy = false;
-    $('btn-action').disabled = false;
-    $('btn-reset').textContent = '重置';
-    toast(e.message, 5000);
-    updateAction();
-  }
-});
-
+// ── 重置 ──
+// 恢复搜索功能已整体取消（2026-10-08 用户定）：每次点「开始搜索」都是全新一轮，无断点。
 /** 清空一切：条件 + 岗位词 + 城市 + 结果，回到空白条件页 */
 function fullReset() {
   S.companies = []; S.positions = []; S.cities = [{ ...ALL_COUNTRY }];   // 重置回默认：全国（2026-10-07 用户定的空选规则）
   S.filters = {};   // HR 活跃度/福利待遇两个维度已下线（用户 2026-10-07 定），重置即全空
   S.jobs = []; S.selected = new Set(); S.greeted = false; S.taskId = null;
   S.busy = false; S.sending = false; S.sendPaused = false; S.searchStopped = false; S.hasResult = false;
-  ask(MSG.CLEAR_SEARCH_CHECKPOINT).catch(() => {});   // 重置 = 从头来，搜索断点一并清掉（需求 #11）
-  $('btn-resume-search').hidden = true;
   $('send-banner').hidden = true; exitSendingBar();
   $('search-progress').hidden = true;
   $('funnel').hidden = true;
@@ -1259,6 +1236,12 @@ async function runSearch() {
     const filters = { ...S.filters, industry: industryCodes, businessDistrict: districtVals };
     // HR 活跃度/福利待遇已下线（用户 2026-10-07 定）：清掉存档里可能残留的旧值，不再发给后台
     delete filters.hrActive; delete filters.welfare;
+    // 精投只带布置得动的维度（用户 2026-10-08 定，界面已隐去）：剥掉海投时可能
+    // 选过的残留值（行业/规模/融资/工作区域/求职类型），免得混进后台配置。
+    // 精投有效筛选 = 薪资/经验/学历 + 目标城市。
+    if (S.searchMode === 'company') {
+      for (const k of ['industry', 'scale', 'stage', 'businessDistrict', 'jobType']) delete filters[k];
+    }
 
     // ★ 把岗位词语义归纳到 BOSS 职位类型的【三级叶子 code】，塞进 position 参数，
     //   让 BOSS 服务端只返回对应职能家族的岗位，从源头挡掉模糊匹配的杂项。
@@ -1281,6 +1264,10 @@ async function runSearch() {
 
     // 海投不按公司过滤（公司模块已隐藏），只有精投才带公司
     const sendCompanies = S.searchMode === 'company' ? S.companies : [];
+    // 精投布置/本地过滤用的中文 label（SW 没有 OPT 表）：选中的 code → label
+    const labelsOf = (key) => (S.filters[key] || [])
+      .map((code) => (OPT[key] || []).find((o) => String(o.code) === String(code)))
+      .filter(Boolean).map((o) => o.label);
     // 发令即返回：整轮召回在后台烧几分钟，这里不能 await 整轮（通道撑不住会被
     // 判「channel closed」误报出错）。收尾（loadResults + 复位按钮）交给
     // TASK_PROGRESS 的 'done' 广播在 onMessage 里做。
@@ -1292,9 +1279,13 @@ async function runSearch() {
       cities: S.cities.map((c) => c.code),
       cityNames: S.cities.map((c) => c.name || c.label).filter(Boolean),   // 精投本地按城市名筛用（城市条目只有 label 字段，之前读 c.name 永远为空）
       filters,
-      searchOverrides: S.searchOverrides,   // 手动改过的搜寻名，这些公司用它去定位
+      filterLabels: {   // 精投布置 + 本地过滤用（2026-10-08）：城市走 cityNames，这三维走 label
+        salary: labelsOf('salary'),
+        experience: labelsOf('experience'),
+        degree: labelsOf('degree'),
+      },
       brandOverrides: S.brandOverrides,     // 贴网址锁定的主页 brandId，直接用、跳过定位
-      searchMinutes: S.searchMinutes,       // 搜索时长(分钟)，决定时间上限 + 行为预算(分钟×12)
+      searchMinutes: S.searchMinutes,       // 搜索时长(分钟)，决定时间上限 + 行为预算(分钟×20)
     });
     // 这里保持 busy=true、按钮停在「停止」，直到 'done'/'error'/'aborted' 广播
   } catch (e) {
@@ -1436,13 +1427,12 @@ function renderCompanyStatus(task) {
       else if (avgPages && pages < avgPages * 0.5) { ico = '⚠'; cls = 'warn'; step += ' · 页数不足平均一半，可能异常'; }
     }
     let html = `<div class="cs-row ${cls}"><span class="cs-ico">${ico}</span><span class="cs-name">${esc(c.name)}</span><span class="cs-step">${esc(step)}</span></div>`;
-    // 有问题的公司（异常/没定位到）：下一行显示用的「搜寻名」+ 更改按钮，可手动改成收得住的名字
+    // 有问题的公司（异常/没定位到）：给「改网址」入口——贴公司主页网址锁定直达。
+    // 改搜索词功能已撤（2026-10-08 用户定）：失败后贴网址/进列表，不再改搜寻名。
     const flagged = s === 'miss' || (s === 'done' && (cls === 'bad' || cls === 'warn'));
     if (flagged) {
-      const term = S.searchOverrides[c.name] || c.search || c.name;
-      const pinned = S.brandOverrides[c.name] ? '（已锁定主页）' : '';
-      html += `<div class="cs-sub"><span class="cs-bid">搜寻名：${esc(term)}${pinned}</span>`
-        + `<button class="cs-edit" data-company="${esc(c.name)}">更改</button>`
+      const pinned = S.brandOverrides[c.name] ? '已锁定主页 · ' : '';
+      html += `<div class="cs-sub"><span class="cs-bid">${pinned}</span>`
         + `<button class="cs-url" data-company="${esc(c.name)}">改网址</button></div>`;
     }
     return html;
@@ -1640,7 +1630,7 @@ function buildJobCard(j) {
     <div class="body">
       <div class="jname">${esc(j.jobName)}</div>
       <div class="jcompany">${companyHtml}</div>
-      <div class="jsalary">${esc(j.salaryDesc || '薪资面议')}</div>
+      <div class="jsalary">${esc(j.salaryDesc || '薪资面议')}${j.city ? `<span class="jcity">${esc(j.city)}</span>` : ''}</div>
       <div class="jgreet-toggle">单岗位－自定义招呼语 <span class="tri">▾</span></div>
       <textarea class="jgreet" rows="3" hidden>${esc(custom)}</textarea>
     </div>`;
@@ -1847,27 +1837,6 @@ $('sel-all').addEventListener('change', (e) => {
 // 「搜索过程与结果」折叠/展开
 $('sd-head').addEventListener('click', () => { S.searchDetailOpen = !S.searchDetailOpen; syncSearchDetail(); });
 
-// 手动改某家公司的「搜寻名」（异常公司那行的「更改」按钮，需密码）
-function saveSearchOverrides() { try { chrome.storage.local.set({ 'jt:searchOverrides': S.searchOverrides }); } catch (e) {} }
-$('company-status').addEventListener('click', (e) => {
-  const btn = e.target.closest('.cs-edit');
-  if (!btn) return;
-  const company = btn.dataset.company;
-  const pw = window.prompt('更改搜寻名需要密码：');
-  if (pw == null) return;
-  if (pw.trim() !== '012026') { toast('密码错误，未更改', 3000); return; }
-  const co = S.companies.find((x) => x.name === company) || {};
-  const cur = S.searchOverrides[company] || co.search || company;
-  const v = window.prompt(`改「${company}」的搜寻名（我用来在 BOSS 定位这家的中文名，比如 智谱AI 该搜 智谱华章）`, cur);
-  if (v == null) return;
-  const term = v.trim();
-  if (term && term !== (co.search || company)) S.searchOverrides[company] = term; else delete S.searchOverrides[company];
-  saveSearchOverrides();
-  const sub = btn.closest('.cs-sub'); const span = sub && sub.querySelector('.cs-bid');
-  if (span) span.textContent = `搜寻名：${S.searchOverrides[company] || co.search || company}${S.brandOverrides[company] ? '（已锁定主页）' : ''}`;
-  toast(S.searchOverrides[company] ? `已把「${company}」的搜寻名改成「${S.searchOverrides[company]}」，下次搜这家用它` : `已恢复「${company}」的默认搜寻名`, 3500);
-});
-
 // 改网址：贴公司主页网址 → 抽出 brandId → 下次搜这家直接进这个主页（跳过定位，最稳）
 function saveBrandOverrides() { try { chrome.storage.local.set({ 'jt:brandOverrides': S.brandOverrides }); } catch (e) {} }
 $('company-status').addEventListener('click', (e) => {
@@ -1889,8 +1858,7 @@ $('company-status').addEventListener('click', (e) => {
     toast(`已锁定「${company}」的主页，下次搜这家直接进它、跳过定位`, 3800);
   }
   const sub = btn.closest('.cs-sub'); const span = sub && sub.querySelector('.cs-bid');
-  const co = S.companies.find((x) => x.name === company) || {};
-  if (span) span.textContent = `搜寻名：${S.searchOverrides[company] || co.search || company}${S.brandOverrides[company] ? '（已锁定主页）' : ''}`;
+  if (span) span.textContent = S.brandOverrides[company] ? '已锁定主页 · ' : '';
 });
 
 // 招呼语模式：AI 定制 / 自定义
@@ -1922,11 +1890,13 @@ async function runGreeting(onlyIds) {
   if (!batch.length) { updateAction(); return; }
   const batchSet = new Set(batch);
   S.busy = true;
+  S.greeting = true;                    // 生成中标记：给「停止」按钮分流用（搜索停止走 stopSearch）
   S.greeted = false;
   S.greetDone = 0;
   S.greetTotal = batch.length;
   $('btn-action').disabled = true;
   $('btn-action').textContent = `生成中 0/${S.greetTotal}…`;
+  $('btn-reset').textContent = '停止';   // 生成中「重置」变「停止」（用户 2026-10-08 定）
 
   // 把本批（空格子）岗位的招呼语框展开，置为「生成中」沙漏态；已填内容的卡片不碰
   for (const el of document.querySelectorAll('#job-list .jcard')) {
@@ -1948,6 +1918,8 @@ async function runGreeting(onlyIds) {
     });
   } catch (e) {
     S.busy = false;
+    S.greeting = false;
+    $('btn-reset').textContent = '重置';
     toast(`启动失败：${e.message}`, 5000);
     updateAction();
   }
@@ -1986,7 +1958,9 @@ function onGreetingItem(d) {
 /** 全部生成完成。就地收尾，不跳屏。 */
 async function onGreetingDone(task) {
   S.busy = false;
+  S.greeting = false;
   S.greeted = true;
+  $('btn-reset').textContent = '重置';
 
   // 自定义模式：招呼语已落好，直接投递
   if (S.pendingSendAfterGreet) {
@@ -2314,6 +2288,8 @@ chrome.runtime.onMessage.addListener((msg) => {
       if (t.phase === 'greeting_done') onGreetingDone(t);
       if (t.phase === 'greeting_error') {
         S.busy = false;
+        S.greeting = false;
+        $('btn-reset').textContent = '重置';
         toast(t.error || '生成失败', 6000);
         updateAction();
       }
@@ -2336,7 +2312,6 @@ chrome.runtime.onMessage.addListener((msg) => {
       if (t.phase === 'done' || t.phase === 'aborted' || t.phase === 'error') {
         S.hasResult = true;
         loadResults().catch(() => {});
-        refreshResumeSearchBtn();   // 断点由后台在收尾时落盘，到这才查得到（需求 #11）
       }
     }
     else {
@@ -2370,7 +2345,7 @@ chrome.runtime.onMessage.addListener((msg) => {
   // HR 活跃度和工作性质之前是预设好的，现在交还给用户自己点：
   // 预设值会让人以为「我什么都没选」，实际上池子已经被悄悄收窄了。
 
-  const st = await chrome.storage.local.get([STORE.UI.FILTER_STATE, 'jt:searchOverrides', 'jt:brandOverrides']);
+  const st = await chrome.storage.local.get([STORE.UI.FILTER_STATE, 'jt:brandOverrides']);   // jt:searchOverrides 已随改搜索词功能撤除（2026-10-08），旧键残留无害不再读
   const saved = st[STORE.UI.FILTER_STATE];
   if (saved) {
     S.searchMode = saved.searchMode || 'position';
@@ -2394,7 +2369,6 @@ chrome.runtime.onMessage.addListener((msg) => {
     const dn = currentDistrictNames();
     S.filters.businessDistrict = (S.filters.businessDistrict || []).filter((v) => dn.includes(v));
   }
-  S.searchOverrides = st['jt:searchOverrides'] || {};
   S.brandOverrides = st['jt:brandOverrides'] || {};
   // 搜索时长固定，不再从存储读用户值
 
@@ -2408,12 +2382,27 @@ chrome.runtime.onMessage.addListener((msg) => {
 
   Tracker.track('panel_open');   // 埋点：使用日活（打开面板即算活跃；面板不展示统计，数据进本地队列+定时上报）
 
+  // 埋点（2026-10-08 碎片数据方案）：
+  // ① 按钮点击全局委托——所有 <button> 和 id 以 btn- 开头的元素，点击即记一条
+  //    button_click（name 取元素 id，没有 id 取按钮文本前 20 字），后台按 name 分组计数。
+  document.addEventListener('click', (e) => {
+    try {
+      const el = e.target && e.target.closest ? e.target.closest('button,[id^="btn-"]') : null;
+      if (!el) return;
+      const name = el.id || (el.textContent || '').trim().slice(0, 20);
+      if (name) Tracker.track('button_click', { name });
+    } catch (err) { /* 静默 */ }
+  }, true);
+  // ② 在线心跳——面板开着每 60 秒记一条 online_tick（sec=60），后台累加即总在线时长。
+  //    面板关闭 JS 即停，天然不多算；事件持久化在本地，断网不丢。
+  setInterval(() => { try { Tracker.track('online_tick', { sec: 60 }); } catch (err) { /* 静默 */ } }, 60000);
+
   try {
     const r = await ask(MSG.GET_RESUME);
     S.resumeImages = r.images || [];
     S.resumeText = r.text || '';
     if (S.resumeImages.length) {
-          $set('ocr-status', S.resumeText ? `已读取 ${S.resumeText.length} 字` : '未读取');
+          $set('ocr-status', S.resumeText ? `已读取 ${S.resumeText.length} 字` : '已保存图片，生成时自动读取');
     }
     renderUploads();
     if (S.resumeText) loadRecommendedPositions();

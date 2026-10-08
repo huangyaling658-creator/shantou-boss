@@ -22,7 +22,10 @@ const COMPANY_LIB = [
   { g: '大厂', n: '小红书', url: 'https://job.xiaohongshu.com/', a: ['小红书', '行吟信息', '行吟'] },
   { g: '大厂', n: '百度', url: 'https://talent.baidu.com/', a: ['百度', '百度在线', '小度', '度小满'] },
   { g: '大厂', n: '美团', url: 'https://zhaopin.meituan.com/', a: ['美团', '美团点评', '大众点评'] },
-  { g: '大厂', n: '京东', url: 'https://zhaopin.jd.com/', a: ['京东', '京东科技', '京东物流', '京东健康'] },
+  // 京东别名摘掉「京东物流」（2026-10-08 用户定）：京东物流/京东集团在 BOSS 是两页，
+  // 别名留着会把「京东」单名单元误路由到京东物流页（company-urls 查表别名命中）。
+  // 京东物流改走額外記錄：不打按钮、靠打字搜名字进列表直达。
+  { g: '大厂', n: '京东', url: 'https://zhaopin.jd.com/', a: ['京东', '京东科技', '京东健康'] },
   { g: '大厂', n: '拼多多', url: 'https://help.pinduoduo.com/recruit/delivery.html', a: ['拼多多', 'Temu', '寻梦信息'] },
   { g: '大厂', n: '网易', url: 'https://hr.163.com/', a: ['网易', '网易云音乐', '网易有道', '网易伏羲'] },
   { g: '大厂', n: '哔哩哔哩', url: 'https://jobs.bilibili.com/', a: ['哔哩哔哩', 'B站', 'bilibili'] },

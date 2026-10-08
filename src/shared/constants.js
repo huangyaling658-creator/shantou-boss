@@ -14,9 +14,6 @@ const MSG = {
   GET_STATE: 'GET_STATE',
   SAVE_CONFIG: 'SAVE_CONFIG',
   START_RECALL: 'START_RECALL',
-  RESUME_RECALL: 'RESUME_RECALL',             // 恢复搜索：从上次手动停止的断点续跑（需求 #11）
-  GET_SEARCH_CHECKPOINT: 'GET_SEARCH_CHECKPOINT',   // 查搜索断点（面板决定要不要显示「恢复搜索」）
-  CLEAR_SEARCH_CHECKPOINT: 'CLEAR_SEARCH_CHECKPOINT', // 重置时清掉断点
   CLASSIFY_POSITIONS: 'CLASSIFY_POSITIONS',   // 岗位词→BOSS职位类目 语义归类（LLM兜底）
   START_GREETING: 'START_GREETING',     // 为已选岗位批量生成招呼语（立即返回，进度走广播）
   GET_TASK: 'GET_TASK',                 // 面板重连时拉一次当前任务状态
@@ -47,13 +44,18 @@ const MSG = {
   COMPANY_BOX_SEARCH: 'COMPANY_BOX_SEARCH',  // 驱动公司主页「查找职位关键词」框搜索
   COMPANY_DOM_COLLECT: 'COMPANY_DOM_COLLECT',  // 直接读公司招聘页的岗位卡片（不抓接口）
   COMPANY_DOM_PAGE: 'COMPANY_DOM_PAGE',  // 单步：翻一页(可选)+读这一页的卡，由 SW 全局调度
+  COMPANY_APPLY_FILTERS: 'COMPANY_APPLY_FILTERS',  // 精投布置：点公司页筛选下拉（城市/经验/学历/薪资），点不上跳「全部/不限」交本地过滤
   DRIVE_HOME_SEARCH: 'DRIVE_HOME_SEARCH', // 海投 v2：驱动 BOSS 首页搜索框搜词（真人链路第 2 步）
   SCROLL_RESET: 'SCROLL_RESET',         // 海投 v2：清空滚动读卡状态（换词/换城时）
   COLLECT_ONE_SCROLL: 'COLLECT_ONE_SCROLL', // 海投 v2 单步：读新增卡→滚一屏，节拍由 SW 全局闸掐
   APPLY_FILTER: 'APPLY_FILTER',         // 海投 v2 布置：在结果页筛选栏上按 code 点一个筛选项（真人链路第 3 步的延伸）
   APPLY_CITY: 'APPLY_CITY',             // 海投 v2 布置地点：点页面城市选择器选城市（jobs 列表页不吃 URL 的 city 参数）
   READ_CITY_CHIP: 'READ_CITY_CHIP',     // 读页面当前城市 chip 文本（校验地点布置是否生效）
-  READ_BRAND_DOM: 'READ_BRAND_DOM',  // 从搜索结果页 DOM 里读公司 brandId（不走签名接口，可后台并行）
+  COMPANY_CLICK_CARD: 'COMPANY_CLICK_CARD',  // 精投真人链路：结果页点卡片左下角公司名进公司页（attempt=第几个候选）
+  READ_COMPANY_HEADER: 'READ_COMPANY_HEADER', // 精投：读公司页页头公司名（核对是否进对门，SW 轮询用）
+  COMPANY_CLICK_JOBS_TAB: 'COMPANY_CLICK_JOBS_TAB', // 精投：点公司页「招聘职位」tab 进职位列表
+  COMPANY_JOBS_READY: 'COMPANY_JOBS_READY',  // 精投：职位列表是否就绪（页内「查找职位」搜索框出现）
+  COMPANY_BOX_ENSURE: 'COMPANY_BOX_ENSURE',  // 精投：布置后检查搜索框，被清空则补填重搜（先搜词再布置的配套）
   CHECK_RISK: 'CHECK_RISK',         // 读页面上的验证码/风控迹象
   GREETING_SWITCH: 'GREETING_SWITCH',   // 读写 BOSS 自带招呼语开关
   OPEN_DETAIL: 'OPEN_DETAIL',           // 打开岗位详情页并读沟通按钮文案
@@ -87,10 +89,8 @@ const STORE = {
     RESUME_TEXT: 'sw:resumeText',
     QUOTA: 'sw:quota',
     RISK_LOG: 'sw:riskLog',
-    BRAND_CACHE: 'sw:brandCache',
     RESUME_IMAGES: 'sw:resumeImages',   // [{dataUrl, name, ocrDone}]，最多 10 张
     FILTER_DICT: 'sw:filterDict',       // 从 BOSS 页面抓来的筛选项字典 + 抓取时间
-    SEARCH_CHECKPOINT: 'sw:searchCheckpoint',   // 搜索断点（需求 #11：手动停止后「恢复搜索」续跑用）
   },
   UI: {
     PANEL_TAB: 'ui:panelTab',
@@ -123,11 +123,11 @@ const BOSS = {
     JOBS: '/web/geek/jobs',
     CHAT: '/web/geek/chat',
     JOB_DETAIL: (id) => `https://www.zhipin.com/job_detail/${id}.html`,
-    // 公司简介页（没有搜索框和职位列表）——保留但精投不用它
-    COMPANY: (brandId) => `https://www.zhipin.com/gongsi/${brandId}.html`,
-    // 公司「招聘职位」筛选页：这里才有「查找职位关键词」框 + 职位列表(company/job/list)
+    // 公司简介页：用户贴公司主页网址的精投单元直达用（2026-10-08 真人链路：其余单元一律首页走进去）
     // brandId 结尾常带 ~，不能被转义，所以直接拼接、不走 encodeURIComponent
-    // ?ka=company-jobs：对齐用户点「招聘职位」tab 的真实来源标记，更自然、也确保进职位态
+    COMPANY: (brandId) => `https://www.zhipin.com/gongsi/${brandId}.html`,
+    // 招聘职位页直达（2026-10-08 用户定：列表网址一律用招聘職位頁形態）：贴网址/列表命中
+    // 时开这个核对页头，省「简介页→职位页」一次导航。搜索流程仍靠点卡自然进、不改。
     COMPANY_JOBS: (brandId) => `https://www.zhipin.com/gongsi/job/${brandId}.html?ka=company-jobs`,
   },
   // BOSS 业务错误码
@@ -149,8 +149,8 @@ const CONFIG = {
   // 有公司收完 N 变小，剩下的自动提速。精确到 0.01 秒。
   TASK_HARD_TIMEOUT_MS: 300000,   // 5 分钟硬封顶：总时长到点就停，把已收的落库展示
   // ↓ 旧的全局队列冷却 / 按并行数间隔，全同步上线后不再用（留给老路径兜底）
-  COOLDOWN_MIN_MS: 4000,               // 面板耗时预估用的冷却均值（与全局行为闸 4~6 秒对齐）
-  COOLDOWN_MAX_MS: 6000,
+  COOLDOWN_MIN_MS: 3000,               // 面板耗时预估用的冷却均值（与全局行为闸 3~4 秒对齐，2026-10-08 随精投闸 3~4 秒同步改）
+  COOLDOWN_MAX_MS: 4000,
   PARALLEL_INTERVAL: { 1: [4000, 6000], 2: [5000, 7000], 3: [6000, 8000], 4: [6000, 8000] },
   COLLECT_CAP_PER_SEARCH: 450,    // 单个「关键词×城市」最多收这么多（≈BOSS 单搜天花板 ~300-450）
   // 堆量模式：先把池子搞大(单搜到顶 + 多词×多城叠加)，再靠精筛收窄到 ~75。
@@ -160,18 +160,20 @@ const CONFIG = {
   // 想要更全就调大倍数，想更快就调小（1 = 只收刚好够一批）。
   RECALL_CAP_MULTIPLIER: 2,       // 召回上限 = SOFT_BATCH_LIMIT × 2 ≈ 150
   // 搜索时长：产品定好的标准值，不再暴露给用户调。召回封顶后搜索会「收够即停」，
-  // 这个分钟数只当安全时间上限（兜底防卡死）+ 行为预算(分钟×12，ACTIONS_PER_MINUTE)。
-  DEFAULT_SEARCH_MINUTES: 5,
+  // 这个分钟数只当安全时间上限（兜底防卡死）+ 行为预算(分钟×ACTIONS_PER_MINUTE)。
+  DEFAULT_SEARCH_MINUTES: 3,
   // 列表翻页间隔。固定节奏像机器、容易被判频繁，改成区间随机抖动，更像人、更不触限流。
   // 实测 1.2 秒几页就被封；拉到 4.5~7 秒随机，慢一点但稳。
   PAGE_REQUEST_INTERVAL_MS: 3500,       // 兜底/非翻页场景仍用它
   PAGE_INTERVAL_MIN_MS: 4000,           // 翻页最小间隔 4 秒
   PAGE_INTERVAL_MAX_MS: 6000,           // 翻页最大间隔 6 秒（4~6 秒随机，精确到 0.01 秒）
-  TURN_GATE_MIN_MS: 4000,               // 全局行为闸（精投）：每 4~6 秒随机放行一个行为（用户 2026-10-06 定）
-  TURN_GATE_MAX_MS: 6000,
-  HAITOU_TURN_GATE_MIN_MS: 3000,        // 全局行为闸（海投）：每 3~4 秒随机放行一个滚动行为（用户 2026-10-07 由 4~5 改 3~4；精投仍 4~6 不变）
+  TURN_GATE_MIN_MS: 3000,               // 全局行为闸（精投·搜）：每 3~4 秒随机放行一个翻页行为（用户 2026-10-08 由 4~6 改 3~4，与海投一致）
+  TURN_GATE_MAX_MS: 4000,
+  HAITOU_TURN_GATE_MIN_MS: 3000,        // 全局行为闸（海投）：每 3~4 秒随机放行一个滚动行为（用户 2026-10-07 由 4~5 改 3~4）
   HAITOU_TURN_GATE_MAX_MS: 4000,
-  ACTIONS_PER_MINUTE: 12,               // 行为预算：每分钟 12 个行为（均值 5 秒一个；5 分钟 = 60 个，用户 2026-10-06 定）
+  ACTIONS_PER_MINUTE: 20,               // 行为预算：每分钟 20 个行为（3 分钟 = 60 个。2026-10-06 定 12，10-08 改 17，10-08 晚再改 20 配 3 分钟=60 个，闸仍 3~4 秒——预算是上限不是配速）
+  COMPANY_LAYOUT_MIN_MS: 500,           // 精投布置闸（公司页四下拉）：每个动作 0.5~1.5 秒随机（用户 2026-10-08 定；海投布置仍走 HAITOU_LAYOUT_* 1~2 秒）
+  COMPANY_LAYOUT_MAX_MS: 1500,
   HAITOU_MAX_TABS: 5,                   // 海投 v2：一城一标签，最多 5 城并行（用户定的上限）
   HAITOU_STOP_MINUTES: 3,               // 海投中止条件①：3 分钟硬闸（用户 2026-10-07 定）
   HAITOU_MAX_RESULTS: 150,              // 海投中止条件②：收满 150 个结果即停（用户 2026-10-07 定）
@@ -180,8 +182,8 @@ const CONFIG = {
   // 原则：这类行为要模仿人类——人不会同一秒连开 5 个分页，也不会用完瞬间关掉。
   TAB_OPEN_MIN_MS: 1000,                // 开页闸：每开一个分页全局隔 1~2 秒随机，轮流开不突刺
   TAB_OPEN_MAX_MS: 2000,
-  TAB_CLOSE_MIN_MS: 1000,               // 关页延迟：用完隔 1~3 秒随机再关，且异步不阻塞下一个
-  TAB_CLOSE_MAX_MS: 3000,
+  TAB_CLOSE_MIN_MS: 1000,               // 关页延迟：用完隔 1~2 秒随机再关（2026-10-08 用户由 1~3 收紧），且异步不阻塞下一个
+  TAB_CLOSE_MAX_MS: 2000,
   HAITOU_LAYOUT_MIN_MS: 1000,           // 海投布置闸：布置阶段每个动作 1~2 秒随机一个（用户 2026-10-07 由 2~3 改 1~2）；
   HAITOU_LAYOUT_MAX_MS: 2000,           // 覆盖开分页/回主页/驱动搜索框/选城导航/逐个筛选项点击；精投开页仍走 TAB_OPEN_* 不变
   ROUND_INTERVAL_MS: 6000,        // 换一组搜索条件之间的停顿
@@ -240,6 +242,8 @@ const CONFIG = {
   LLM_TIMEOUT_MS: 30000,
   GREETING_STALL_MS: 30000,       // 生成看门狗（用户 2026-10-07 定）：30 秒没有新招呼语产出就停止整批，已生成的保留
   JD_FETCH_TIMEOUT_MS: 20000,     // 抓岗位详情 HTML 的超时。之前这段无超时，被风控挂起时 5 个 worker 全卡死、面板永远 0/N
+  PING_TIMEOUT_MS: 5000,          // ping 标签页 content script 的超时。2026-10-08 坑：页面被冻结/风控卡死时监听还在但永不响应，不带超时会整批无声停摆
+  TAB_ENSURE_TIMEOUT_MS: 30000,   // ensureBossTab 整体兜底超时。超时后生成流程降级为「跳过抓 JD 照样生成」，投递流程报错收场
   OCR_TIMEOUT_MS: 60000,
 
   GREETING_MIN_LEN: 350,

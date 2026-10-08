@@ -434,6 +434,8 @@ button.btn.primary:disabled { background: #a9cbbb; color: #fff; cursor: not-allo
 .jcard .jcompany-link:hover { text-decoration: underline; }
 .jcard .jcompany:empty, .jcard .jsalary:empty { display: none; }
 .jcard .jsalary { font-size: 12.5px; font-weight: 700; color: var(--accent); margin-top: 4px; }
+/* 城市地点跟在薪资右边，空一个字（1em）的距离；浅色细字，不跟薪资混为一体（2026-10-08 用户定） */
+.jcard .jsalary .jcity { margin-left: 1em; font-weight: 400; color: var(--text-2); }
 .jcard .tags { margin-top: 7px; display: flex; flex-wrap: wrap; gap: 6px; }
 .jcard .tag {
   font-size: 11px; padding: 3px 9px; border-radius: 6px;
