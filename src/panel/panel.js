@@ -151,8 +151,9 @@ const OPT = {
   // 这里只留「不限」占位；选中存区名，真实 code 运行时用抓取字典按名字对齐。
   businessDistrict: [{ code: '', label: '不限' }],
   jobType: [
+    // 全职=1901、兼职=1903 是用户 2026-10-08 实测样本；实习=1902 未实测。
     { code: '', label: '不限' }, { code: '1901', label: '全职' },
-    { code: '1902', label: '兼职' }, { code: '1903', label: '实习' },
+    { code: '1903', label: '兼职' }, { code: '1902', label: '实习' },
   ],
   salary: [
     { code: '', label: '不限' }, { code: '402', label: '3K以下' }, { code: '403', label: '3-5K' },
@@ -160,13 +161,14 @@ const OPT = {
     { code: '406', label: '20-50K' }, { code: '407', label: '50K以上' },
   ],
   experience: [
-    // 「不限」(空 code = 不发这个筛选) 与 BOSS 的「经验不限」(102) 是一回事，
-    // 只保留统一风格的「不限」，去掉重复的 102。
-    { code: '', label: '不限' }, { code: '103', label: '在校生(实习)' },
-    { code: '101', label: '应届生(校招)' },
-    { code: '104', label: '1年以内' }, { code: '105', label: '1-3年' },
-    { code: '106', label: '3-5年' }, { code: '107', label: '5-10年' },
-    { code: '108', label: '10年以上' },
+    // 码表按用户 2026-10-08 实测样本修正（旧内置表整体错位：103在校生/101应届生…是错的）。
+    // 「不限」(空 code = 不发这个筛选) 与 BOSS 的「经验不限」(101) 是一回事，
+    // 只保留统一风格的「不限」，去掉重复的 101。
+    { code: '', label: '不限' }, { code: '108', label: '在校生(实习)' },
+    { code: '102', label: '应届生(校招)' },
+    { code: '103', label: '1年以内' }, { code: '104', label: '1-3年' },
+    { code: '105', label: '3-5年' }, { code: '106', label: '5-10年' },
+    { code: '107', label: '10年以上' },
   ],
   degree: [
     { code: '', label: '不限' }, { code: '209', label: '初中及以下' },

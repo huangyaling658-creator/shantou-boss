@@ -48,9 +48,9 @@ const MSG = {
   DRIVE_HOME_SEARCH: 'DRIVE_HOME_SEARCH', // 海投 v2：驱动 BOSS 首页搜索框搜词（真人链路第 2 步）
   SCROLL_RESET: 'SCROLL_RESET',         // 海投 v2：清空滚动读卡状态（换词/换城时）
   COLLECT_ONE_SCROLL: 'COLLECT_ONE_SCROLL', // 海投 v2 单步：读新增卡→滚一屏，节拍由 SW 全局闸掐
-  APPLY_FILTER: 'APPLY_FILTER',         // 海投 v2 布置：在结果页筛选栏上按 code 点一个筛选项（真人链路第 3 步的延伸）
-  APPLY_CITY: 'APPLY_CITY',             // 海投 v2 布置地点：点页面城市选择器选城市（jobs 列表页不吃 URL 的 city 参数）
-  READ_CITY_CHIP: 'READ_CITY_CHIP',     // 读页面当前城市 chip 文本（校验地点布置是否生效）
+  APPLY_FILTER: 'APPLY_FILTER',         // 【已停用 2026-10-08】海投点击版布置：点结果页筛选项。布置改网址后不再调用，处理器留档
+  APPLY_CITY: 'APPLY_CITY',             // 【已停用 2026-10-08】海投点击版布置地点：点城市选择器。用户实测 jobs 页吃 city 参数，改 URL 布置
+  READ_CITY_CHIP: 'READ_CITY_CHIP',     // 【已停用 2026-10-08】读城市 chip 文本（配合 APPLY_CITY 校验用），随点击版一起退役
   COMPANY_CLICK_CARD: 'COMPANY_CLICK_CARD',  // 精投真人链路：结果页点卡片左下角公司名进公司页（attempt=第几个候选）
   READ_COMPANY_HEADER: 'READ_COMPANY_HEADER', // 精投：读公司页页头公司名（核对是否进对门，SW 轮询用）
   COMPANY_CLICK_JOBS_TAB: 'COMPANY_CLICK_JOBS_TAB', // 精投：点公司页「招聘职位」tab 进职位列表
@@ -184,8 +184,8 @@ const CONFIG = {
   TAB_OPEN_MAX_MS: 2000,
   TAB_CLOSE_MIN_MS: 1000,               // 关页延迟：用完隔 1~2 秒随机再关（2026-10-08 用户由 1~3 收紧），且异步不阻塞下一个
   TAB_CLOSE_MAX_MS: 2000,
-  HAITOU_LAYOUT_MIN_MS: 1000,           // 海投布置闸：布置阶段每个动作 1~2 秒随机一个（用户 2026-10-07 由 2~3 改 1~2）；
-  HAITOU_LAYOUT_MAX_MS: 2000,           // 覆盖开分页/回主页/驱动搜索框/选城导航/逐个筛选项点击；精投开页仍走 TAB_OPEN_* 不变
+  HAITOU_LAYOUT_MIN_MS: 1000,           // 海投布置闸：每个单元开分页前过一道，1~2 秒随机（用户 2026-10-07 由 2~3 改 1~2）；
+  HAITOU_LAYOUT_MAX_MS: 2000,           // 10-08 布置改网址后只剩「开分页」这一个用途；精投开页仍走 TAB_OPEN_* 不变
   ROUND_INTERVAL_MS: 6000,        // 换一组搜索条件之间的停顿
   MAX_PARALLEL_TABS: 4,           // 并行搜索的标签页上限（对齐即投：一城一页并行）
   CANDIDATE_CAP: 300,             // 廉价过滤后送去拉 JD 的上限

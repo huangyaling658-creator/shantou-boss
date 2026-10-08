@@ -449,3 +449,17 @@ AI 提出了「薪資行內聯加城市 span：jsalary 後跟 <span class=jcity>
 用戶 提出了「調：總時長拉杆 3 分鐘、總行為預算 60 個、關頁延遲 1-2s、等頁面渲染 0.5-1.5s、沒定位到重做間隔 1-2s」的五項調參要求 ;
 AI 提出了「①DEFAULT_SEARCH_MINUTES 5→3（面板默認+SW 兜底都改，拉杆範圍 3~30 不變）；②ACTIONS_PER_MINUTE 17→20（3分鐘×20=60 個整；閘仍 3~4 秒管配速，預算是上限——180 秒÷3.5 秒均值≈51 個可放行，60 是給重做+10 留的餘量；若拉杆調 5 分鐘則預算 100）；③TAB_CLOSE 1~3s→1~2s（與海投共用）；④精投 onePass 三處等渲染 randInt(800,1500)→randInt(500,1500)（搜索後/goBack 後/導航後）；⑤重做間隔 randInt(1000,3000)→randInt(1000,2000)」的調整方案 ;
 修改的内容：修改 src/shared/constants.js（DEFAULT_SEARCH_MINUTES=3、ACTIONS_PER_MINUTE=20、TAB_CLOSE_MAX_MS=2000 及註釋）；修改 src/background/service-worker.js（mins 兜底 5→3、預算公式 fallback 17→20 及兩處註釋、三處 randInt(800,1500)→(500,1500)、重做間隔(1000,3000)→(1000,2000)）；修改 src/panel/panel.js（註釋 分鐘×12→×20）；3 個 JS 文件通過 node --check，node 複算 3分鐘=60 個無誤；未實跑（重載後看：3 分鐘收工、預算 60、行為閘仍 3~4 秒不變）;
+---
+時間 2026-10-08 20:13:35 ;
+用戶 提出了「上傳github」的要求 ;
+AI 執行了「git add -A + commit + push：提交 a3268cb，13 個文件（含新建 src/shared/company-urls.js 與 統一後台接入_改動說明.md），1405 插入 438 刪除，推送至 origin/main（73baada..a3268cb）」的操作，提交信息覆蓋：布置定稿改網址、boss公司頁網址列表、真人鏈路微重做、網址失效回退、重做+10、參數五連調、城市顯示、撤改搜索詞、恢復搜索拆除等 ccab1e3 之後全部改動 ;
+---
+時間 2026-10-08 20:58:04 ;
+用戶 提出了「海搜直接用改網址」+ 12 條實測樣本（①/web/geek/jobs?city=碼&query=詞直接開 ②multiBusinessDistrict=一碼一區逗號連、限9個 ③position=100101 ④jobType=1901全職/1903兼職單選 ⑤payType=2501~2504 ⑥partTime=2701~2706 ⑦salary=402~407不限刪參數 ⑧experience=108,102,101,103,104,105,106,107 ⑨degree=209,208,206,202,203,204,205 ⑩industry=100020 ⑪scale=301~306 ⑫stage=801~808）的要求 ;
+AI 核对后確認「①復數 /web/geek/jobs 吃全部參數（用戶樣本逐維實測），推翻此前『復數頁不吃 city』的結論——海投可整段跳過開主頁打字/點篩選；②發現兩處舊錯：面板內置 experience 碼表整體錯位（正確：在校生=108/應屆生=102/經驗不限=101/1年以內=103/1-3年=104/3-5年=105/5-10年=106/10年以上=107）、jobType 兼職=1903（舊表誤寫1902）；③區域參數名是 multiBusinessDistrict，舊代碼拼的 businessDistrict 頁面不認——舊 URL 兜底的區域條件從沒生效過（collector 讀頁面時讀的就是 multiBusinessDistrict，兩邊對不上實錘）」的判斷 ;
+AI 提出了「runHaitouScroll 微重做：一詞一城一分頁直接開 buildSearchUrl({query,city,...filters}) 全條件 URL，一次到位；開主頁/DRIVE_HOME_SEARCH/ensureCity/APPLY_CITY/逐個點篩選/URL補丁/城市復校整段拆除（APPLY_CITY/APPLY_FILTER/READ_CITY_CHIP 的 content 處理器留檔不刪不再調用，同 realClick 先例；DRIVE_HOME_SEARCH 精投在用不受影響）；buildSearchUrl 修參數名+補 payType/partTime 透傳+區域限9截斷；區域超9/行業超3 截斷並 warn 如實上報；每單元開頁後 Console 落『海投布置URL』取證行」的修改方法 ;
+修改的内容：修改 src/background/service-worker.js（runHaitouScroll 佈置段整段重寫約 -120 行、buildSearchUrl 修參數名與註釋、兩處舊註釋改寫）；修改 src/panel/panel.js（OPT.experience 碼表按樣本修正、OPT.jobType 1901全職/1903兼職/1902實習未實測）；修改 src/shared/constants.js（APPLY_CITY/APPLY_FILTER/READ_CITY_CHIP 標已停用、HAITOU_LAYOUT_* 註釋改寫）；修改 docs/DEVELOPMENT.md（§2 整節重寫為佈置改網址版+總覽行）；3 個 JS 文件通過 node --check；node 對拍 9 條用戶樣本全部一致（含九區逗號連、超9截斷、區名丟棄、不限不帶參）；未實跑（重載後跑海投應見：每單元一步到位落在全條件結果頁、Console 有佈置URL行、60 行為幾乎全用於滾動收卡；注意：面板已存的經驗/求職類型選項是按舊錯碼存的，需在面板上重選一次）;
+---
+時間 2026-10-08 20:59:39 ;
+用戶 提出了「全維單選樣式」實跑樣本 + 截圖：https://www.zhipin.com/web/geek/jobs?city=101010100&multiBusinessDistrict=110101&position=100101&jobType=1901&salary=402&experience=108&degree=209&industry=100020&scale=301&stage=801&query=ai产品经理 —— 截圖篩選欄 10 個維度全部顯示 (1)，證明一條 URL 把所有條件一次帶上 BOSS 全認 ;
+AI 執行了「用 buildSearchUrl 對拍該樣本：傳入同條件（city/businessDistrict/position/jobType/salary/experience/degree/industry/scale/stage/query）產出的 URL 與用戶樣本 11 個參數逐一比對，完全一致（僅參數順序不同，無影響）」的驗證——海投佈置改網址版的構造器與人工點選全維單選的結果等價，無需任何代碼改動 ;

@@ -184,9 +184,12 @@ function closeTabLater(tabId) {
  * 不用手动补注入。
  */
 async function runHaitouScroll(config, merged, onProgress) {
-  // 2026-10-07 用户定的最新链路：分页数 = 地点数 × 职位词数（一词一城一个分页，
-  // 最多 5 个并行、其余的排队）；每个分页：BOSS 主页(?ka=header-home-logo) →
-  // 驱动搜索栏搜职位词 → 顺着结果页筛选栏从左到右逐个点已选条件（不限/没选 = 跳过）→ 滚动读卡。
+  // 2026-10-08 用户定的最新链路（推翻 10-07 的点击版）：分页数 = 地点数 × 职位词数
+  // （一词一城一个分页，最多 5 个并行、其余的排队）；每个分页**直接开全条件 URL**：
+  //   /web/geek/jobs?city={码}&query={词}&{全部筛选参数}
+  // 不再开主页打字、不再点城市选择器、不再逐个筛选项点击——用户实测复数 jobs 页
+  // city/query/multiBusinessDistrict/position/jobType/payType/partTime/salary/
+  // experience/degree/industry/scale/stage 全部吃 URL 参数（样本见工作笔记 10-08）。
   // 中止条件（用户 2026-10-07 定）：3 分钟 / 150 个结果 / 60 个行为，任一先到即停——
   // 只改中止口径，冷却时间不受影响；
   // 60 个行为按「词×城」单元平分（沿用用户定的分配口径），每一次滚动 = 一个行为，
@@ -205,202 +208,49 @@ async function runHaitouScroll(config, merged, onProgress) {
   const perCity = {};
   const stop = () => state.stopRequested || state.task.phase === 'aborted' || Date.now() >= taskDeadline
     || actionsDone >= budget || merged.size >= maxResults;
-  // 布置闸：海投布置阶段每个动作 1~2 秒随机一个（用户 2026-10-07 由 2~3 改 1~2，HAITOU_LAYOUT_*）。
-  // 与开页闸共用同一条「预约时间槽」，几个城分页的布置动作自然排队轮流来。
+  // 布置闸：海投每开一个单元分页前过一道（1~2 秒随机一个，HAITOU_LAYOUT_*）。
+  // 与开页闸共用同一条「预约时间槽」，几个城分页自然排队轮流开，不一窝蜂。
   const layoutSlot = () => acquireOpenSlot(CONFIG.HAITOU_LAYOUT_MIN_MS || 1000, CONFIG.HAITOU_LAYOUT_MAX_MS || 2000);
   const report = (cityCode, kw) => onProgress && onProgress({
     city: cityCode, keyword: kw, collected: merged.size, actionsDone, actionsBudget: budget,
   });
 
-  // ── 布置地点：在搜索后的结果页上点城市选择器（筛选栏最左的城市 chip）──
-  // 城市由页面按 IP/cookie 定，所以要像人一样点选择器；
-  // 点完读 chip 文本校验；点不动退兜底：写 lastCity cookie + 带参重载一次。
-  // 单数 /web/geek/job 才是吃 URL 参数的搜索结果页（筛选锚点的 href 也指向它）。
-  const searchPageUrl = (filters) => {
-    const u = new URL(buildSearchUrl(filters));
-    u.pathname = '/web/geek/job';
-    return u.toString();
-  };
-  const readCity = (tid) => askTab(tid, MSG.READ_CITY_CHIP).catch(() => ({ ok: false, text: '' }));
-  const cityOk = (r, name) => !!(r && r.ok && (!name || r.text === name));
-  const ensureCity = async (tid, code, name) => {
-    if (!code) return true;                        // 没选城市（全国）不用布置
-    if (cityOk(await readCity(tid), name)) return true;
-    await layoutSlot();                            // 点城市选择器 = 一个布置行为，排队
-    await chrome.tabs.update(tid, { active: true }).catch(() => {});
-    const r = await askTab(tid, MSG.APPLY_CITY, { code, name }).catch(() => ({ ok: false }));
-    if (r.ok && r.clicked) {
-      await waitForTabComplete(tid).catch(() => {});
-      await U.sleep(U.randInt(500, 1000));         // 等页面换城市重渲染，像人扫一眼
-    }
-    if (cityOk(await readCity(tid), name)) return true;
-    // 兜底：lastCity cookie + 带 city 参数重载。注意 cookie 是全域共享的，多城分页并行时
-    // 可能被别的城分页写覆盖，所以这只是兜底，主路径仍是页面级点击。
-    try { await chrome.cookies.set({ url: BOSS.ORIGIN + '/', name: 'lastCity', value: String(code), path: '/' }); } catch (e) { /* 无权限/失败则只靠 URL */ }
-    const t = await chrome.tabs.get(tid).catch(() => null);
-    if (t && t.url) {
-      const u = new URL(t.url);
-      u.searchParams.set('city', code);
-      await chrome.tabs.update(tid, { url: u.toString() }).catch(() => {});
-      await waitForTabComplete(tid).catch(() => {});
-      await U.sleep(U.randInt(500, 1000));
-    }
-    const chk = await readCity(tid);
-    if (!cityOk(chk, name) && onProgress) onProgress({
-      city: code, keyword: '', collected: merged.size, actionsDone, actionsBudget: budget,
-      warn: `地点布置未生效：页面显示「${chk.text || '?'}」，应为「${name || code}」`,
+  await runInBatches(units, CONFIG.HAITOU_MAX_TABS || 5, async ({ code: cityCode, kw }) => {
+    if (stop()) return;
+    // ① 拼全条件 URL 直接开分页（2026-10-08 用户定：布置改网址，一次到位）。
+    //    工作区域 BOSS 限选 9 个（用户实测），超了截前 9 个并如实上报；
+    //    公司行业副选 BOSS 限 3 个（用户 2026-10-07 告知），沿用截前 3 个 + 上报。
+    const f = { ...(config.filters || {}) };
+    const bdRaw = Array.isArray(f.businessDistrict) ? f.businessDistrict.filter(Boolean) : (f.businessDistrict ? [f.businessDistrict] : []);
+    const bdCodes = bdRaw.map(String).filter((v) => /^\d+$/.test(v));
+    if (bdCodes.length > 9 && onProgress) onProgress({
+      city: cityCode, keyword: kw, collected: merged.size, actionsDone, actionsBudget: budget,
+      warn: `工作区域最多选 9 个（BOSS 限制），已按前 9 个布置（面板共选 ${bdCodes.length} 个）`,
     });
-    return cityOk(chk, name);
-  };
+    f.businessDistrict = bdCodes.slice(0, 9);
+    const indRaw = Array.isArray(f.industry) ? f.industry.filter(Boolean) : (f.industry ? [f.industry] : []);
+    if (indRaw.length > 3 && onProgress) onProgress({
+      city: cityCode, keyword: kw, collected: merged.size, actionsDone, actionsBudget: budget,
+      warn: `公司行业副选最多 3 个，已按前 3 个布置（面板共选 ${indRaw.length} 个）`,
+    });
+    if (indRaw.length) f.industry = indRaw.map(String).slice(0, 3);
 
-  await runInBatches(units, CONFIG.HAITOU_MAX_TABS || 5, async ({ code: cityCode, name: cityName, kw }) => {
+    const url = buildSearchUrl({ query: kw, city: cityCode, ...f });
+    await layoutSlot();   // 开分页 = 一个布置行为，排队轮流来（模仿人类）
     if (stop()) return;
-    // 筛选条件分流：顺着结果页筛选栏从左到右的次序点（用户 2026-10-07 定），不限/没选 = 跳过。
-    // 行业是主选+副选结构，副选 BOSS 限 3 个（用户 2026-10-07 告知）→ 最多点 3 个，超出如实上报；
-    // 其余维度同维度多选点不出来（下拉单选）→ 留在 URL 最后统一补。
-    const f = config.filters || {};
-    const CLICK_ORDER = ['businessDistrict', 'position', 'jobType', 'salary', 'experience', 'degree', 'industry', 'scale', 'stage'];
-    const clickList = [];
-    const clickedFilters = {};
-    const urlFilters = {};
-    for (const k of CLICK_ORDER) {
-      const arr = Array.isArray(f[k]) ? f[k].filter(Boolean) : (f[k] ? [f[k]] : []);
-      if (!arr.length) continue;                       // 不限/没选 → 跳过
-      if (k === 'industry') {
-        const subs = arr.map(String).slice(0, 3);
-        if (arr.length > 3 && onProgress) onProgress({
-          city: cityCode, keyword: kw, collected: merged.size, actionsDone, actionsBudget: budget,
-          warn: `公司行业副选最多 3 个，已按前 3 个布置（面板共选 ${arr.length} 个）`,
-        });
-        for (const code of subs) clickList.push({ key: k, code });
-        clickedFilters[k] = subs.join(',');
-      } else if (k === 'businessDistrict') {
-        // 工作区域可多选（2026-10-07 用户定）：逐个去点，不限个数。
-        // 值可能是真实 code 也可能是区名（没抓到 code 时），collector 两种都能匹配。
-        for (const v of arr) clickList.push({ key: k, code: String(v) });
-        const codes = arr.map(String).filter((v) => /^\d+$/.test(v));
-        if (codes.length) clickedFilters[k] = codes.join(',');   // URL 兜底只带真 code，区名塞 URL 没意义
-      } else if (arr.length === 1) {
-        clickList.push({ key: k, code: String(arr[0]) });
-        clickedFilters[k] = String(arr[0]);
-      } else {
-        urlFilters[k] = arr;   // 同维度多选 → URL 兜底
-      }
-    }
-    // ① 开分页到 BOSS 主页（用户 2026-10-07 定的初始环境）。开分页先过布置闸：
-    //    几个单元分页每隔 1~2 秒随机轮流开，不一窝蜂齐开（模仿人类）。
-    await layoutSlot();
-    if (stop()) return;
-    const tab = await chrome.tabs.create({ url: BOSS.ORIGIN + '/?ka=header-home-logo', active: true });
+    const tab = await chrome.tabs.create({ url, active: true });
     const tabId = tab.id;
     try {
       await waitForTabComplete(tabId);
       let readyOk = false;
       for (let i = 0; i < 20; i++) { await U.sleep(500); if ((await pingTab(tabId)).ok) { readyOk = true; break; } }
       if (!readyOk) return;
-      await U.sleep(U.randInt(500, 1000));   // 页面加载完人也要看一眼再动手（停留 0.5~1 秒，用户 2026-10-07 定）
-
-      // ② 驱动主页搜索栏搜职位词（用户 2026-10-07 定：主页起步 → 搜索栏搜职位）。
-      await layoutSlot();   // 驱动搜索栏（填词+点搜索）= 一个布置行为，排队
-      if (stop()) return;
-      await chrome.tabs.update(tabId, { active: true });
-      const drive = kw
-        ? await askTab(tabId, MSG.DRIVE_HOME_SEARCH, { keyword: kw }).catch(() => ({ ok: false }))
-        : { ok: false };
-      if (drive.ok) {
-        await waitForTabComplete(tabId).catch(() => {});
-        await U.sleep(U.randInt(500, 1000));
-      } else if (kw) {
-        // 搜索栏驱动失败 → 搜索页 URL 兜底（词+城市+全部条件一次带上，后面的点选会自动跳过已生效项）
-        await layoutSlot();   // 兜底导航 = 一个布置行为，排队
-        await chrome.tabs.update(tabId, { url: searchPageUrl({ query: kw, city: cityCode, ...urlFilters, ...clickedFilters }), active: true });
-        await waitForTabComplete(tabId).catch(() => {});
-        await U.sleep(U.randInt(500, 1000));
-      }
-
-      // ③ 顺着筛选栏从左到右布置：先地点（点城市选择器），再逐个点击已选条件。
-      await ensureCity(tabId, cityCode, cityName);
-      // ③ 顺着筛选栏从左到右逐个点已选条件（APPLY_FILTER，按 href 的 参数名=code 匹配锚点；
-      //    选项藏在下拉里时 collector 会先点开该维度再找）。已选中跳过；
-      //    找不到选项 → 退回 URL 导航补上（同维度追加不覆盖），条件不丢。
-      for (const c of clickList) {
-        if (stop()) break;
-        await layoutSlot();   // 每点一个筛选项 = 一个布置行为，排队
-        await chrome.tabs.update(tabId, { active: true }).catch(() => {});
-        const r = await askTab(tabId, MSG.APPLY_FILTER, c).catch(() => ({ ok: false }));
-        if (r.ok && !r.skipped) {
-          await waitForTabComplete(tabId).catch(() => {});
-          await U.sleep(U.randInt(500, 1000));   // 点完等渲染，像人扫一眼新列表
-        } else if (!r.ok) {
-          if (!/^\d+$/.test(String(c.code))) {
-            // 区名没有真实 code，点不出来也 URL 补不了，如实上报（条件可能未生效）
-            if (onProgress) onProgress({
-              city: cityCode, keyword: kw, collected: merged.size, actionsDone, actionsBudget: budget,
-              warn: `工作区域「${c.code}」没在页面上点出来（无真实编码可 URL 补），该条件可能未生效`,
-            });
-          } else {
-            const t = await chrome.tabs.get(tabId).catch(() => null);
-            if (t && t.url) {
-              const u = new URL(t.url);
-              const cur = u.searchParams.get(c.key);
-              u.searchParams.set(c.key, cur ? `${cur},${c.code}` : c.code);   // 行业副选有多个，追加不覆盖
-              await chrome.tabs.update(tabId, { url: u.toString() }).catch(() => {});
-              await waitForTabComplete(tabId).catch(() => {});
-              await U.sleep(U.randInt(500, 1000));
-            }
-          }
-        }
-      }
-      // 多选等点不了的条件最后统一用 URL 补一次（条件不丢）
-      if (Object.keys(urlFilters).length) {
-        const t = await chrome.tabs.get(tabId).catch(() => null);
-        if (t && t.url) {
-          const u = new URL(t.url);
-          let miss = false;
-          for (const [k, v] of Object.entries(urlFilters)) {
-            const want = v.join(',');
-            if (u.searchParams.get(k) !== want) { u.searchParams.set(k, want); miss = true; }
-          }
-          if (miss) {
-            await layoutSlot();   // 补条件导航 = 一个布置行为，排队
-            await chrome.tabs.update(tabId, { url: u.toString() }).catch(() => {});
-            await waitForTabComplete(tabId).catch(() => {});
-            await U.sleep(U.randInt(500, 1000));
-          }
-        }
-      }
-      // 工作区域多选校验（2026-10-07 用户定区域可多选）：逐个点可能互相冲掉，
-      // 有真 code 的区点完后看 URL 里还在不在，缺了用 URL 一次性补齐
-      // （区名没 code 的补不了，只能靠上面点选尽力）。
-      {
-        const want = (clickedFilters.businessDistrict || '').split(',').filter(Boolean);
-        if (want.length > 1) {
-          const t = await chrome.tabs.get(tabId).catch(() => null);
-          if (t && t.url) {
-            const u = new URL(t.url);
-            const cur = (u.searchParams.get('businessDistrict') || '').split(',').filter(Boolean);
-            const missing = want.filter((c) => !cur.includes(c));
-            if (missing.length) {
-              await layoutSlot();   // 补区域导航 = 一个布置行为，排队
-              u.searchParams.set('businessDistrict', cur.concat(missing).join(','));
-              await chrome.tabs.update(tabId, { url: u.toString() }).catch(() => {});
-              await waitForTabComplete(tabId).catch(() => {});
-              await U.sleep(U.randInt(500, 1000));
-            }
-          }
-        }
-      }
-      // 布置完校验地点还在（点选/兜底导航可能冲掉城市），丢了补一次全条件搜索页导航
-      if (cityCode && !cityOk(await readCity(tabId), cityName)) {
-        await layoutSlot();   // 纠偏导航 = 一个布置行为，排队
-        await chrome.tabs.update(tabId, { url: searchPageUrl({ query: kw, city: cityCode, ...urlFilters, ...clickedFilters }), active: true });
-        await waitForTabComplete(tabId).catch(() => {});
-        await U.sleep(U.randInt(500, 1000));
-      }
-      await U.sleep(U.randInt(500, 1000));   // 等首屏渲染 + 嗅探器捕模板（随机，不写死）
+      await U.sleep(U.randInt(500, 1000));   // 页面加载完人也要看一眼再动手（停留 0.5~1 秒）
+      // 取证：布置后的真实 URL 落日志——参数在 → 导航成了、没生效是 BOSS 没认参数。
+      console.log('[闪投] 海投布置URL:', decodeURIComponent(url));
       await askTab(tabId, MSG.SCROLL_RESET).catch(() => {});
 
-      // ④ 滚动读卡：一次滚动 = 一个行为。滚动懒加载只在前台标签触发（后台被
+      // ② 滚动读卡：一次滚动 = 一个行为。滚动懒加载只在前台标签触发（后台被
       //    Chrome 节流），所以每步先把标签激活——人一次也只能看一个标签。
       let noNew = 0;
       for (let s = 0; s < perUnit && !stop(); s++) {
@@ -425,7 +275,7 @@ async function runHaitouScroll(config, merged, onProgress) {
     } catch (e) {
       console.log('[闪投] 海投滚动采集异常:', String(e.message || e));
     } finally {
-      closeTabLater(tabId);   // 模仿人类：用完隔 1~3 秒随机再关，不秒删
+      closeTabLater(tabId);   // 模仿人类：用完隔 1~2 秒随机再关，不秒删
     }
   });
   return { actionsDone, perCity };
@@ -903,16 +753,22 @@ function buildSearchUrl(filters) {
   // 筛选项现在是多选，存成数组，拼 URL 时逗号连接（对齐即投）
   const val = (v) => Array.isArray(v) ? v.filter(Boolean).join(',') : v;
   if (filters.position) u.searchParams.set('position', val(filters.position));
-  for (const key of ['experience', 'degree', 'salary', 'scale', 'stage', 'jobType', 'industry']) {
+  // 参数名/码表全部按用户 2026-10-08 实测样本：salary=402~407、experience=101~108、
+  // degree=202~209、scale=301~306、stage=801~808、jobType=1901全职/1903兼职、
+  // industry=100020…、payType=2501~2504、partTime=2701~2706（后两者面板还没有，先透传）。
+  // 多选逗号拼接（用户实测：选九个区就是九个码逗号连）。不限 = 不带这个参数。
+  for (const key of ['experience', 'degree', 'salary', 'scale', 'stage', 'jobType', 'industry', 'payType', 'partTime']) {
     const v = val(filters[key]);
     if (v) u.searchParams.set(key, v);
   }
-  // 工作区域（2026-10-07 起可多选）：值里可能混着区名（没抓到真实 code），
-  // URL 只带数字 code，区名靠布置时在页面上按文字点。
+  // 工作区域（2026-10-08 用户实测）：参数名是 multiBusinessDistrict（旧代码拼的
+  // businessDistrict 页面根本不认，等于区域条件从没通过 URL 生效过）；
+  // 一码对一区，BOSS 限选 9 个 → 超了截前 9 个（SW 里会附带 warn 上报）。
+  // 值里可能混着区名（没抓到真实 code），URL 只带数字 code。
   const bd = val(filters.businessDistrict);
   if (bd) {
-    const codes = String(bd).split(',').filter((v) => /^\d+$/.test(v));
-    if (codes.length) u.searchParams.set('businessDistrict', codes.join(','));
+    const codes = String(bd).split(',').filter((v) => /^\d+$/.test(v)).slice(0, 9);
+    if (codes.length) u.searchParams.set('multiBusinessDistrict', codes.join(','));
   }
   return u.toString();
 }
@@ -1095,7 +951,7 @@ async function runRecall(config = {}) {
 
     // 精投不再全网搜公司名（那是全文检索，必带别家公司）。它走「公司→岗位→地点」：
     // 真人链路进公司招聘职位页（首页搜公司→点卡→核对→招聘职位），全部在 augmentFromCompanyPages 里做。
-    // 海投 v2 走真人链路：主页→搜索框→筛选→滚动读卡，在 runHaitouScroll 里做。
+    // 海投 v2：一词一城一个分页直接开全条件 URL（布置改网址，2026-10-08 定）→ 滚动读卡，在 runHaitouScroll 里做。
     let htResult = null;   // 海投结果（actionsDone/perCity）；精投为 null
     if (mode === 'position') {
       htResult = await runHaitouScroll(config, merged, (p) => {
