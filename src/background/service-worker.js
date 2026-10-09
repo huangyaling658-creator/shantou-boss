@@ -695,6 +695,8 @@ async function augmentFromCompanyPages(merged, config, onProgress) {
         statuses[t.company] = 'miss';
         if (!brandMiss.includes(t.company)) brandMiss.push(t.company);
         console.log('[闪投] 没定位到', t.company); diag.push({ company: t.company, step: '没定位到' });
+        // 埋点：定位失败上报平台（重做 3 次后仍没进对门，1 家公司 1 条）
+        if (typeof Tracker !== 'undefined') Tracker.track('locate_fail', { reason: 'company_miss' });
       }
     }
     // 指标按公司累计（跨单元）：用时/页数累加，count 取该公司当前在库岗位数
@@ -1518,6 +1520,8 @@ async function doSend(jobIds) {
         job.state = JOB_STATE.SKIPPED;
         await Repo.putJob(job);
         log('skip', 'HR 最近联系过');
+        // 埋点：投递跳过（HR 冷却）上报平台
+        if (typeof Tracker !== 'undefined') Tracker.track('deliver_skip', { reason: SKIP_REASON.HR_COOLDOWN });
         continue;
       }
     }
@@ -1537,6 +1541,8 @@ async function doSend(jobIds) {
         job.state = JOB_STATE.SKIPPED;
         await Repo.putJob(job);
         log('skip', '这个岗位之前聊过了');
+        // 埋点：投递跳过（聊过了）上报平台
+        if (typeof Tracker !== 'undefined') Tracker.track('deliver_skip', { reason: SKIP_REASON.ALREADY_CHATTED });
         continue;
       }
 
@@ -1574,6 +1580,8 @@ async function doSend(jobIds) {
         job.dispatch = { status: 'failed', failReason: r.reason };
         job.state = JOB_STATE.FAILED;
         await Repo.putJob(job);
+        // 埋点：投递失败上报平台（reason=原始代号，如 input_not_found）
+        if (typeof Tracker !== 'undefined') Tracker.track('deliver_fail', { reason: r.reason || 'unknown' });
         // 把失败原因翻译成人话
         const why = {
           input_not_found: '没找到聊天输入框', send_btn_not_found: '没找到发送按钮',
