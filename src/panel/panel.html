@@ -92,6 +92,8 @@
     </div>
     <div class="pills" id="city-quick"></div>
     <button class="link-more" id="btn-city-more">展开更多</button>
+    <!-- 展开后：BOSS 全量城市（按省分组），固定最大高度、可滚动 -->
+    <div class="city-all" id="city-all" hidden></div>
     <div class="picked-wrap" id="city-picked" hidden>
       <div class="picked-label">已选城市</div>
       <div class="chips" id="city-selected"></div>
@@ -136,8 +138,9 @@
   </div>
   <!-- 投递中：原地在岗位列表上方显示进度，不切走页面（对齐即投）-->
   <div class="progress" id="send-banner" hidden>
-    <div class="progress-bar"><div class="progress-fill" id="sendbar-fill"></div></div>
     <div class="progress-phase" id="sendbar-phase"></div>
+    <div class="progress-bar"><div class="progress-fill" id="sendbar-fill"></div></div>
+    <div class="progress-timer" id="sendbar-timer"></div>
   </div>
   <div id="login-warn" class="login-warn" hidden>⚠ 结果异常偏少（每家基本只有 1 页）。很可能是 BOSS 直聘登录已失效，请在 BOSS 页面重新登录后再搜一次。</div>
 
@@ -222,6 +225,7 @@
 <script src="../shared/constants.js"></script>
 <script src="../shared/utils.js"></script>
 <script src="../shared/tracker.js"></script>
+<script src="../data/cities.js"></script>
 <script src="../data/companies.js"></script>
 <script src="../data/positions.js"></script>
 <script src="../data/position-tree.js"></script>

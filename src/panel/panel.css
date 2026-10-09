@@ -189,6 +189,19 @@ body {
 }
 .link-more:hover { text-decoration: underline; }
 
+/* 展开城市：同一片胶囊区固定最大高度、超出滚动（不另起框、不分省） */
+#city-quick.scroll {
+  max-height: 300px;
+  overflow-y: auto;
+  margin-top: 2px;
+  padding: 10px;
+  border: 1px solid var(--line-soft);
+  border-radius: 12px;
+  background: var(--bg-soft, #faf9f7);
+}
+#city-quick.scroll::-webkit-scrollbar { width: 8px; }
+#city-quick.scroll::-webkit-scrollbar-thumb { background: #d8d2ca; border-radius: 8px; }
+
 /* ── 已选 ── */
 .picked-wrap { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line-soft); }
 .picked-label { font-size: 12px; color: var(--muted); margin-bottom: 8px; }

@@ -9,6 +9,38 @@
 const DB_NAME = 'jingtou';
 const DB_VERSION = 1;
 
+// ── 写库前的结构化克隆兜底 ──
+// 个别岗位会带上无法被 IndexedDB 克隆的字段（DOM 采集兜底时混进的节点、
+// 接口返回里的异常数组/函数等），一旦出现，整次 put 会同步抛 DataCloneError，
+// 连累整轮搜索报「Failed to execute 'put' ... could not be cloned」。
+// 正常岗位走的是零开销的 happy path（直接 put）；只有真抛错时才逐字段剔除后重写，
+// 并在 Console 点名到底是哪个字段坏了，方便定位根因。
+function _isCloneable(v) { try { structuredClone(v); return true; } catch (_) { return false; } }
+function _sanitize(rec) {
+  if (!rec || typeof rec !== 'object') return rec;
+  const out = Array.isArray(rec) ? [] : {};
+  const dropped = [];
+  for (const k of Object.keys(rec)) {
+    const v = rec[k];
+    if (_isCloneable(v)) out[k] = v;
+    else if (v && typeof v === 'object') out[k] = _sanitize(v);   // 深入一层，尽量保住可序列化的部分
+    else dropped.push(k);
+  }
+  if (dropped.length) {
+    console.warn('[闪投] 写库剔除不可克隆字段:', dropped.join(','),
+      '于', rec.jobId || rec.taskId || rec.date || rec.id || '(未知记录)');
+  }
+  return out;
+}
+/** 对一个 objectStore 做 put，遇不可克隆字段自动剔除后重试（见上说明）。 */
+function _safePut(os, rec) {
+  try { os.put(rec); }
+  catch (e) {
+    if (e && e.name === 'DataCloneError') { os.put(_sanitize(rec)); }
+    else throw e;
+  }
+}
+
 const STORES = {
   JOBS: 'jobs',
   TASKS: 'tasks',
@@ -107,7 +139,7 @@ class IndexedDBRepository {
     const db = await this.open();
     return new Promise((resolve, reject) => {
       const tx = db.transaction(STORES.JOBS, 'readwrite');
-      tx.objectStore(STORES.JOBS).put(job);
+      _safePut(tx.objectStore(STORES.JOBS), job);
       tx.oncomplete = () => resolve(job);
       tx.onerror = () => reject(tx.error);
     });
@@ -121,7 +153,7 @@ class IndexedDBRepository {
       const tx = db.transaction(STORES.JOBS, 'readwrite');
       const os = tx.objectStore(STORES.JOBS);
       const now = Date.now();
-      for (const j of jobs) { j.updatedAt = now; os.put(j); }
+      for (const j of jobs) { j.updatedAt = now; _safePut(os, j); }
       tx.oncomplete = () => resolve(jobs.length);
       tx.onerror = () => reject(tx.error);
     });
@@ -199,7 +231,7 @@ class IndexedDBRepository {
     const db = await this.open();
     return new Promise((resolve, reject) => {
       const tx = db.transaction(STORES.TASKS, 'readwrite');
-      tx.objectStore(STORES.TASKS).put(task);
+      _safePut(tx.objectStore(STORES.TASKS), task);
       tx.oncomplete = () => resolve(task);
       tx.onerror = () => reject(tx.error);
     });

@@ -317,15 +317,44 @@ function matchSalary(job, labels) {
  *
  * @returns {number} 新增岗位数
  */
+// BOSS 公司招聘页的「职位类型」一级大类码（2026-10-09 在真实公司页实测扒取）。
+// 关键：职位类型走 URL 路径 /gongsi/job/{类型码}/{brandId}.html，城市码在前时是
+// /gongsi/job/c{城市码}/{类型码}/{brandId}.html（顺序反了是 404）。这是精投过滤岗位的
+// 正解——纯 URL 路径，不碰那个驱动不动的搜索框。
+const JOB_CATEGORY = [
+  { code: '110000', kw: ['产品'] },
+  { code: '100000', kw: ['技术', '开发', '工程师', '算法', '数据', '研发', '测试', '运维', '前端', '后端', '架构', 'java', 'python', 'golang', 'c++', '大模型', '机器学习', '嵌入式', 'sre', 'devops'] },
+  { code: '130000', kw: ['运营', '客服'] },
+  { code: '120000', kw: ['设计', 'ui', 'ux', '视觉', '交互', '美术'] },
+  { code: '140000', kw: ['市场', '公关', '广告', '品牌', '营销', '投放'] },
+  { code: '160000', kw: ['销售', 'bd', '商务'] },
+  { code: '150000', kw: ['人力', 'hr', '财务', '行政', '招聘', '会计'] },
+  { code: '250000', kw: ['采购'] },
+  { code: '240000', kw: ['供应链', '物流', '仓储'] },
+  { code: '180000', kw: ['金融', '投资', '风控', '基金', '证券', '银行'] },
+  { code: '190000', kw: ['教育', '培训', '讲师', '教师', '老师'] },
+  { code: '210000', kw: ['医疗', '健康', '医药', '护士', '医生', '临床', '药'] },
+  { code: '260000', kw: ['咨询', '翻译', '法律', '律师', '法务'] },
+  { code: '170000', kw: ['直播', '影视', '传媒', '编导', '剪辑', '主播'] },
+];
+// 岗位词 → 职位大类码。按关键词匹配（产品在最前，「高级产品经理」也归产品）。匹配不到 → ''（走全量，本地兜底过滤）。
+function categoryCodeOf(word) {
+  const w = String(word || '').toLowerCase();
+  for (const c of JOB_CATEGORY) if (c.kw.some((k) => w.includes(k))) return c.code;
+  return '';
+}
+
 async function augmentFromCompanyPages(merged, config, onProgress) {
   const companies = (config.companies || []);
   if (!companies.length) return 0;
 
-  // 真人链路（用户 2026-10-08 定）：开首页 → 搜公司名 → 点卡进公司页 → 核对 →
-  // 改网址一次到位（招聘职位+搜词+布置）→ 翻页扫卡 → 并集。全程一个分页。
-  // 单元 = 公司 × 城市 × 岗位词：一个单元开一个分页，布置这一个城市 + 搜这一个词。
+  // 精投链路（2026-10-09 重做）：开首页 → 搜公司名 → 点卡进公司页 → 核对 →
+  // 拼 URL /gongsi/job/c{城市}/{职位类型码}/{brandId}.html 一次到位（城市+职位大类都在网址里）
+  // → 翻页扫卡 → 并集。全程一个分页，不再用搜索框。单元 = 公司 × 城市 × 职位大类码。
   const posWords = (config.positions || []).filter(Boolean);
-  const queries = posWords.length ? posWords : [''];   // 没填岗位词就拉这家公司全部岗
+  // 岗位词映射到的职位大类码（去重）；一个都映射不到就用 '' 全量单元（本地按岗位名兜底过滤）。
+  const catCodes = [...new Set(posWords.map(categoryCodeOf))];
+  const typeUnits = catCodes.length ? catCodes : [''];
 
   // diag 全量镜像到 SW Console（2026-10-08 用户定稿：面板成功的只报份数、失败/异常才解释；
   // 过程取证行「定位/布置/布置后URL/份额回流」上面板会刷屏，挪去 Console 看 [闪投][diag]）。
@@ -361,8 +390,10 @@ async function augmentFromCompanyPages(merged, config, onProgress) {
   let unitDone = 0;
   let added = 0;
 
-  // 搜索时长：设置里拉杆的分钟数（3~30，默认 3），决定时间上限 + 行为预算（每分钟 20 个，3 分钟 = 60 个）
-  const mins = Math.min(30, Math.max(3, config.searchMinutes || 3));
+  // 搜索时长：决定时间上限 + 行为预算（每分钟 20 个）。
+  // 精投放宽下限到 8 分钟（2026-10-09 用户定）：公司页要本地按岗位名过滤、淘汰率高，
+  // 得多翻几页才能攒够每家 50 个过滤后的岗，时间给足，别让时间先到、量还没攒够。
+  const mins = Math.min(30, Math.max(8, config.searchMinutes || 8));
   const taskTimeoutMs = mins * 60000;
   const taskDeadline = (state.task.startedAt || Date.now()) + taskTimeoutMs;
   const bOver = config.brandOverrides || {};     // 用户贴的公司主页网址抽出的 brandId（公司名→brandId）
@@ -380,12 +411,14 @@ async function augmentFromCompanyPages(merged, config, onProgress) {
   });
   for (const t of targets) if (t.brandSrc === '列表') diag.push({ company: t.company, step: '定位:boss公司頁網址列表命中，直达' });
 
-  // 单元装配：公司 × 城市 × 词。
+  // 单元装配：公司 × 城市 × 职位大类码（2026-10-09 重做为 URL 路径方案）。
+  // 每个单元 = 一个「公司 + 城市 + 职位大类」，拼成一条 /gongsi/job/c{城市}/{类型}/{brand}.html
+  // 导航一次就过滤到位。岗位词已归并成大类码（typeUnits），同大类的多个词只跑一个单元。
   const units = [];
   for (const t of targets) {
     for (const city of cityList) {
-      for (const kw of queries) {
-        units.push({ t, city, kw });
+      for (const typeCode of typeUnits) {
+        units.push({ t, city, typeCode });
       }
     }
   }
@@ -403,22 +436,35 @@ async function augmentFromCompanyPages(merged, config, onProgress) {
   // N 变小、剩下的自动提速。满 TASK_HARD_TIMEOUT_MS（5 分钟，从任务开始算）就停、把已收的展示。
   const timeUp = () => Date.now() >= taskDeadline;   // 5 分钟硬封顶（含解析阶段，见上）
   const pagesCap = () => U.randInt(CONFIG.COMPANY_PAGES_MIN || 10, CONFIG.COMPANY_PAGES_MAX || 15);
-  // 每家公司召回封顶：单批只投 SOFT_BATCH_LIMIT 个，一家收到它的 RECALL_CAP_MULTIPLIER 倍
-  // (默认 2×≈150)就够精筛挑了，到量就停这家、不再往下翻，省时间。
-  const perCompanyCap = (CONFIG.SOFT_BATCH_LIMIT || 75) * (CONFIG.RECALL_CAP_MULTIPLIER || 2);
+  // 每家公司「过滤后」召回封顶：攒够 50 个符合岗位的岗就停这家（2026-10-09 用户定）。
+  const perCompanyCap = CONFIG.COMPANY_KEPT_PER_COMPANY || 50;
 
-  // 把一页卡入库：全局 merged 去重 + slot 自己的 seen；返回这页给「这家」新增了几个
+  // 把一页卡入库：全局 merged 去重 + slot 自己的 seen；返回这页给「这家」新增了几个。
+  // ★ 岗位过滤前置（2026-10-09）：公司页 query 岗位词不生效、返回的是全公司岗位，
+  //   必须在这里按用户选的【所有岗位词】过滤，只有符合的才计入 seen/companySeen/merged——
+  //   这样「每家够 50」数的就是过滤后的 50 个产品岗，开发/销售等岗当场丢掉、不占名额。
+  const posFilterOn = posWords.length > 0;
+  const killedSet = new Set();      // 被岗位过滤砍掉的 jobId（去重，仅作诊断/日志）
+  const killedSample = [];
   const absorb = (slot, res) => {
     let nSlot = 0;
     for (const j of res.jobs || []) {
       if (!j.companyName) j.companyName = slot.company;
+      // 精投是「进这个城市的公司页」搜的，这个岗就属于这个城市——卡片上没读到城市时，
+      // 用单元的城市兜底打标签（用户 2026-10-09 要卡片带城市标签）。
+      if (!j.city && slot.cityName) j.city = slot.cityName;
       if (!j.jobId) continue;
+      if (posFilterOn && !matchesAnyPosition(j.jobName, posWords)) {
+        if (!killedSet.has(j.jobId)) { killedSet.add(j.jobId); if (killedSample.length < 12) killedSample.push(j.jobName); }
+        continue;   // 不符合岗位：直接丢，不入 seen/merged，不占这家的 50 个名额
+      }
       if (!slot.seen.has(j.jobId)) { slot.seen.add(j.jobId); nSlot++; }
-      if (slot.companySeen) slot.companySeen.add(j.jobId);   // 这家公司累计收到的（跨岗位词，用于封顶）
+      if (slot.companySeen) slot.companySeen.add(j.jobId);   // 这家公司【过滤后】累计数，用于 50 封顶
       if (!merged.has(j.jobId)) { j._fromCompanyPage = true; merged.set(j.jobId, j); added++; }
     }
     return nSlot;
   };
+  augmentFromCompanyPages._posCut = () => ({ count: killedSet.size, sample: killedSample.slice() });
   // 翻到底 / 到页数上限 / 这页没新增 / 这家已收够封顶量 —— 任一满足就停翻这个词
   const kwExhausted = (slot) => !slot.lastHasNext || slot.page >= slot.maxPages || slot.lastNew === 0
     || (slot.companySeen && slot.companySeen.size >= perCompanyCap);
@@ -445,7 +491,12 @@ async function augmentFromCompanyPages(merged, config, onProgress) {
   // 行为也过同一条闸），这里只负责本模式的计数。
   let activeCount = 0;   // 仅用于显示/参考
   let actionsDone = 0;   // 已执行的行为数（翻页数），进度% = actionsDone / actionsBudget
-  let actionsBudget = Math.max(1, Math.round(taskTimeoutMs / (60000 / (CONFIG.ACTIONS_PER_MINUTE || 20))));   // 3 分钟 = 60 个
+  // 行为预算（翻页次数上限）：按时长算，再保底「每家公司够翻到 COMPANY_PAGES_MAX 页」，
+  // 免得公司多/岗位淘汰率高时预算先用完、每家攒不够 50（2026-10-09 用户定：宁可多翻）。
+  let actionsBudget = Math.max(
+    Math.round(taskTimeoutMs / (60000 / (CONFIG.ACTIONS_PER_MINUTE || 20))),
+    targets.length * (CONFIG.COMPANY_PAGES_MAX || 40),
+  );
   const turnGate = async () => { await acquireTurnGlobal(); actionsDone++; };
   // 总行为数平分给每个分页（用户 2026-10-08 定）：每个单元最多花自己那一份，花完这个分页收工。
   // 全局闸照旧管节奏（这是上限不是配速），分到不足 2 的保底 2 个（至少读一页+翻一页）。
@@ -477,7 +528,7 @@ async function augmentFromCompanyPages(merged, config, onProgress) {
   // 首页搜公司名 → 点卡片公司名进公司页 → 核对页头 → 点「招聘职位」→ 先搜词再布置 → 翻页扫卡。
   const onePass = async (u) => {
     const t = u.t;
-    const slot = { company: t.company, tabId: null, page: 0, seen: new Set(), companySeen: companySeenBy[t.company] || (companySeenBy[t.company] = new Set()), maxPages: pagesCap(), lastHasNext: false, lastNew: 0 };
+    const slot = { company: t.company, cityName: u.city || '', tabId: null, page: 0, seen: new Set(), companySeen: companySeenBy[t.company] || (companySeenBy[t.company] = new Set()), maxPages: pagesCap(), lastHasNext: false, lastNew: 0 };
     let located = false;
     // 本单元已花的行为数记在 u.actions（份额 u.cap 是动态的：别的单元提前收工会回流加额）
     activeCount++;
@@ -571,7 +622,8 @@ async function augmentFromCompanyPages(merged, config, onProgress) {
       // 海投仍按搜索页样本走多选逗号连，互不回推。
       // 核对页头已通过 → 从当前 URL 抽 brandId（贴网址分支直接用 bid0）→ 拼最终 URL 一次
       // tabs.update。薪资多选/城市无码 → 不带参数，薪资多选走本地过滤（runRecall 里）。
-      const q = u.kw || '';
+      // 岗位过滤走 URL 的【职位大类码】路径（2026-10-09 重做）：/gongsi/job/c{城市}/{类型}/{brand}.html。
+      // 不再用那个驱动不动的搜索框。类型码由岗位词映射（u.typeCode）。
       const salarySel = ((config.filters && config.filters.salary) || []).filter((c) => c);
       const salaryCode = salarySel.length === 1 ? String(salarySel[0]) : '';
       const expSel = ((config.filters && config.filters.experience) || []).filter((c) => c).map(String);
@@ -579,8 +631,10 @@ async function augmentFromCompanyPages(merged, config, onProgress) {
       const expCode = expSel[0] || '';   // 公司页单选：多选取首
       const degCode = degSel[0] || '';
       const cityCode = u.city ? codeOfCity(u.city) : '';
+      const typeCode = u.typeCode || '';
       const fl = config.filterLabels || {};
       const urlBits = [];
+      if (typeCode) urlBits.push(`职位类型✈${typeCode}`);
       if (u.city) urlBits.push(cityCode ? `城市✈${u.city}` : '城市→本地筛(无码)');
       if (salarySel.length) urlBits.push(salaryCode ? `薪资✈${(fl.salary || [])[0] || salaryCode}` : '薪资→本地筛(多选)');
       if (expSel.length) urlBits.push(`经验✈${(fl.experience || [])[0] || expCode}${expSel.length > 1 ? '(单选取首)' : ''}`);
@@ -589,18 +643,20 @@ async function augmentFromCompanyPages(merged, config, onProgress) {
       let jobsReady = false;
       try {
         const curUrl = bid0 ? '' : ((await chrome.tabs.get(slot.tabId)).url || '');
-        const m = curUrl.match(/\/gongsi\/(?:job\/)?(?:c\d+\/)?([^.\/?]+)\.html/);
+        // brandId 提取：跳过可能的城市码段(c+数字)和职位类型码段(6位数字)，取最后的 brand 段。
+        const m = curUrl.match(/\/gongsi\/(?:job\/)?(?:c\d+\/)?(?:\d{6}\/)?([^.\/?]+)\.html/);
         const bid = bid0 || (m && m[1]);
         if (!bid) {
           diag.push({ company: t.company, step: '没从公司页URL抽到brandId:' + curUrl.replace(/^https?:\/\//, '').slice(0, 60) });
           return { located: false, pages: 0 };   // 交给 processUnit 重做
         }
-        const nu = new URL(`${BOSS.ORIGIN}/gongsi/job/${cityCode ? 'c' + cityCode + '/' : ''}${bid}.html`);
-        if (q) nu.searchParams.set('query', q);
+        // 路径顺序实测定死：c{城市}/ 在前，{职位类型码}/ 在后（反了是 404）。
+        const nu = new URL(`${BOSS.ORIGIN}/gongsi/job/${cityCode ? 'c' + cityCode + '/' : ''}${typeCode ? typeCode + '/' : ''}${bid}.html`);
+        // 薪资/经验/学历这几个 query 参数实测生效，照旧带。
         if (salaryCode) nu.searchParams.set('salary', salaryCode);
         if (expCode) nu.searchParams.set('experience', expCode);
         if (degCode) nu.searchParams.set('degree', degCode);
-        if (!q && !salaryCode && !expCode && !degCode) nu.searchParams.set('ka', 'company-jobs');   // 无参数时带上 ka，跟人点 tab 一样
+        if (!salaryCode && !expCode && !degCode) nu.searchParams.set('ka', 'company-jobs');   // 无参数时带上 ka，跟人点 tab 一样
         // 贴网址/列表命中时分页已停在招聘职位页：若最终 URL 与当前 URL 一致（无词无薪资
         // 无城市码），不用再 tabs.update 白刷一次（2026-10-08 用户把列表网址改成职位页形态
         // 后，「核对页头 → 布置导航」经常其实是同一页）。不一致才导航。
@@ -639,40 +695,55 @@ async function augmentFromCompanyPages(merged, config, onProgress) {
       statuses[t.company] = 'searching';
       if (onProgress) onProgress({ company: t.company, keyword: '正在搜职位', unitDone, unitTotal, collected: merged.size, statuses: { ...statuses } });
       await U.sleep(U.randInt(CONFIG.COMPANY_LAYOUT_MIN_MS || 500, CONFIG.COMPANY_LAYOUT_MAX_MS || 1500));   // 布置完停一下再开扫（0.5~1.5 秒）
-      await turnGate(); u.actions++; if (stop()) return { located, pages: 0 };   // 读第 1 页也算一个行为，过全局闸
+
+      // ★ 职位类型已经通过 URL 路径过滤好了（/gongsi/job/c城市/类型/brand.html），
+      //   这里直接翻页读卡即可，不再碰搜索框（2026-10-09 重做）。读到的就是这个大类的岗位。
+      const companyFull = () => (slot.companySeen && slot.companySeen.size >= perCompanyCap);
+      slot.page = 0; slot.lastHasNext = true; slot.lastNew = 1;
+      await turnGate(); u.actions++; if (stop()) return { located, pages: u.actions };   // 读第 1 页也算一个行为，过全局闸
       let res = await askTab(slot.tabId, MSG.COMPANY_DOM_PAGE, { turnFirst: false }).catch(() => ({ jobs: [], hasNext: false }));
       slot.lastNew = absorb(slot, res); slot.page = 1; slot.lastHasNext = !!res.hasNext;
-      live[t.company] = slot.page; report(slot, q);
-      while (!kwExhausted(slot) && !stop() && u.actions < u.cap) {
+      live[t.company] = slot.page; report(slot, typeCode || '全部');
+      while (!kwExhausted(slot) && !stop() && u.actions < u.cap && !companyFull()) {
         await turnGate(); u.actions++;   // 翻一页 = 一个行为，全局每 3~4 秒才放行一个
         if (stop()) break;
         res = await askTab(slot.tabId, MSG.COMPANY_DOM_PAGE, { turnFirst: true }).catch(() => ({ jobs: [], hasNext: false, turned: false }));
         slot.page++;
         slot.lastNew = absorb(slot, res);
         slot.lastHasNext = res.turned === false ? false : !!res.hasNext;
-        live[t.company] = slot.page; report(slot, q);
+        live[t.company] = slot.page; report(slot, typeCode || '全部');
       }
-      if (u.actions >= u.cap && !kwExhausted(slot)) {
-        diag.push({ company: t.company, step: `单元行为份额用完(${u.cap}个)：${u.city || '全国'} ${q || '全部'}` });
+      diag.push({ company: slot.company, keyword: (typeCode ? '类型' + typeCode : '全部') + (u.city ? '@' + u.city : ''), got: slot.companySeen.size, source: 'url-type' });
+      if (u.actions >= u.cap && !companyFull()) {
+        diag.push({ company: t.company, step: `单元行为份额用完(${u.cap}个)：${u.city || '全国'}` });
       }
-      diag.push({ company: slot.company, keyword: (q || '全部') + (u.city ? '@' + u.city : ''), got: slot.seen.size, source: 'dom-parallel' });
-      return { located, pages: slot.page };
+      return { located, pages: u.actions };   // 本单元累计翻页数
     } catch (e) {
       diag.push({ company: t.company, step: '采集异常:' + String(e.message || e).slice(0, 24) });
       return { located, pages: 0 };
     } finally {
-      closeSlot(slot);
+      // 搜成功(定位到并读完)的标签【留着别关】，方便用户回看那页岗位（用户 2026-10-09）；
+      // 只关掉没定位到/重做作废的垃圾标签。
+      if (!located) closeSlot(slot);
       activeCount = Math.max(0, activeCount - 1);
     }
   };
 
-  // 一个单元（公司×城市×词）跑一遍。没定位到的单元重做（用户 2026-10-08 定）：
+  // 一个单元（公司×城市）跑一遍（内部对所有岗位词在搜索框依次搜）。没定位到的单元重做：
   // 最多重做 3 次，每次重做总剩余行为数 +10（actionsBudget 与这个单元的 cap 各 +10，
   // 这份额外预算留给重做的单元用）。定位成功/已定位但提前收工的单元不重做，
   // 省下的份额照常在下方回流给未完单元。
   const processUnit = async (u) => {
     if (stop()) return;
     const t = u.t;
+    // 这家公司已攒够「过滤后」目标量（50）→ 跳过它剩下的单元，不再开页空转（2026-10-09）。
+    // （一家公司的多个城市单元共用 companySeenBy[公司]，第一个城市攒满后其余城市直接跳过。）
+    if ((companySeenBy[t.company] || new Set()).size >= perCompanyCap) {
+      unitDone++;
+      remainBy[t.company] = Math.max(0, (remainBy[t.company] || 1) - 1);
+      if (remainBy[t.company] === 0 && locatedBy[t.company]) statuses[t.company] = 'done';
+      return;
+    }
     const tStart = Date.now();
     let r = await onePass(u);
     // 网址失效不在这层处理（2026-10-08 用户改定）：onePass 里报错后已回退搜索流程兜底，
@@ -862,6 +933,15 @@ const FAMILY_ROOTS = [
   '人力', '行政', '客服', '编辑', '翻译', '训练师', '标注',
 ];
 
+// 职能族的英文/缩写线索：岗位词属于这个族时，岗位名里出现这些也算命中（修 2026-10-09 误砍）。
+// 典型：「Agent评测PM」是产品岗，但名字不带「产品」二字，光靠中文根词会被砍。
+// PM/PO 要求是独立词（前后不是字母），免得误吃 PMO/SPM/APM 之类。
+const FAMILY_ALIASES = {
+  '产品': [/(^|[^a-z])(pm|po)([^a-z]|$)/, /product/],
+  '运营': [/operation/],
+  '设计': [/design|(^|[^a-z])(ui|ux)([^a-z]|$)/],
+};
+
 /** 从岗位词里提取它所属的职能家族根词 */
 function familyRootsOf(position) {
   const lp = String(position || '').toLowerCase();
@@ -880,6 +960,11 @@ function matchesAnyPosition(jobName, positions) {
     //    这种同族但名字不含完整岗位词的岗位。
     const roots = familyRootsOf(pos);
     if (roots.some((r) => n.includes(r.toLowerCase()))) return true;
+    // 3. 英文/缩写线索：如「产品」族的岗位名含独立的 PM/PO 或 product，也算命中（修误砍）。
+    for (const r of roots) {
+      const res = FAMILY_ALIASES[r];
+      if (res && res.some((re) => re.test(n))) return true;
+    }
   }
   return false;
 }
@@ -1027,6 +1112,12 @@ async function runRecall(config = {}) {
 
     const funnel = { raw: merged.size, lastStop, perCity };
     if (companyDiag) funnel.companyDiag = companyDiag;   // 精投每家公司的搜索诊断，显示到面板
+    // 精投：公司页是「全公司岗位」，absorb 已按岗位名过滤。把砍掉的非目标岗数亮给漏斗看，
+    // 否则用户只看到「搜到 50」，不知道其实扫了一大堆、大多是开发/销售等非目标岗（2026-10-09）。
+    if (mode === 'company' && augmentFromCompanyPages._posCut) {
+      const pc = augmentFromCompanyPages._posCut();
+      if (pc.count > 0) { funnel.companyPosCut = pc.count; funnel.companyPosCutSample = pc.sample; }
+    }
     let jobs = [...merged.values()];
 
     // ── 城市过滤 ──
@@ -1065,13 +1156,14 @@ async function runRecall(config = {}) {
       if (Object.keys(localCut).length) funnel.localFilterCut = localCut;
     }
 
-    // ── 岗位名过滤（本地兜底）──
+    // ── 岗位名过滤（本地兜底，仅海投）──
     // BOSS 的推荐填充会无视职位类型筛选硬塞非目标岗（大客户代表、机械工程师…），
     // 翻页闸门拦不干净的，这里再按「职能家族根词」兜一道。
     //
-    // ★ 只在海投跑。精投的产品岗是公司主页接口按「职位类型」服务端筛出来的，
-    //   已经保证是产品类目；这里再按「岗位名含产品二字」卡，会把「AI策略总监/
-    //   用户研究/需求分析」这类名字不带产品的产品岗误杀。精投信任服务端类目。
+    // ★ 精投不在这里过滤：公司招聘页返回的是全公司岗位、query 岗位词不生效，
+    //   精投的岗位过滤已【前置到 absorb】（边翻边按所有岗位词筛，只留符合的、攒满 50），
+    //   到这里 merged 已经是过滤后的，再跑一遍纯属重复。海投没有前置过滤，仍走这一道。
+    //   matchesAnyPosition 已放宽到「职能家族根词」（产品/运营/设计…），同族岗不会误杀。
     if (posWords.length && mode !== 'company') {
       const killed = [];
       jobs = jobs.filter((j) => {
@@ -1494,6 +1586,10 @@ async function doSend(jobIds) {
   const slowFactor = risk.level === 'slow' ? CONFIG.RISK_SLOW_MULTIPLIER : 1;
   const results = [];
   let sent = 0;
+  // 当天已投基数（用插件投过的累计）：本批要【累加】在它之上，不能覆盖。
+  // 修 2026-10-09：原来落库是 q.sentCount = sent，每批都把当天历史覆盖成「本批数」，
+  // 所以「今天累计」永远只剩最后一批的量（用户投了好多却显示 8）。
+  const baseSent = ((await Repo.getQuota(U.today())) || {}).sentCount || 0;
 
   state.stopRequested = false;   // 新一批开始，清掉上一次的停止标志
   state.task = { taskId: newTaskId(), phase: 'sending', startedAt: Date.now(), progress: {} };
@@ -1604,7 +1700,7 @@ async function doSend(jobIds) {
     // 额度落库要实时，SW 随时可能被浏览器回收
     const today = U.today();
     const q = (await Repo.getQuota(today)) || { date: today, sentCount: 0, captchaCount: 0 };
-    q.sentCount = sent;
+    q.sentCount = baseSent + sent;   // 累加在当天已投基数上，不覆盖（见上 baseSent 说明）
     await Repo.putQuota(q);
 
     if (state.stopRequested) break;   // 投完这个若已请求停止，别再进休息/间隔

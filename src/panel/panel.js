@@ -44,9 +44,10 @@ function hideAlert() { $('alert-mask').hidden = true; $('alert-box').hidden = tr
 // 精投目标公司最多 3 家（周五上线需求 #10，P0：利于稳定/提速）。
 // 返回 true = 已满，已弹窗提示，调用方直接 return 不加。
 const COMPANY_MAX = 3;
+const CITY_MAX = 3;   // 目标城市最多 3 个（全国除外）——和公司/岗位对称，压低搜索频次（用户 2026-10-09）
 function companyFull() {
   if (S.companies.length < COMPANY_MAX) return false;
-  showAlert(`目标公司最多选 ${COMPANY_MAX} 家。\n先取消一家，再选新的。`);
+  showAlert('最多选三家目标公司');
   return true;
 }
 
@@ -101,14 +102,8 @@ const HOT_CITIES = [
   { code: '101270100', label: '成都' }, { code: '101180100', label: '郑州' },
   { code: '101040100', label: '重庆' },
 ];
-// BOSS 热门页以外的城市收进「展开更多」（保留原可选范围）
-const MORE_CITIES = [
-  { code: '101190100', label: '南京' }, { code: '101220100', label: '合肥' },
-  { code: '101120100', label: '济南' }, { code: '101120200', label: '青岛' },
-  { code: '101070100', label: '沈阳' }, { code: '101280700', label: '珠海' },
-  { code: '101281600', label: '东莞' }, { code: '101210400', label: '宁波' },
-  { code: '101190200', label: '无锡' },
-];
+// 「展开更多」里的全量城市改用 BOSS 官方字典 CITY_PROVINCES / CITY_ALL（见 data/cities.js），
+// 不再手维护 MORE_CITIES。热门城市行仍用上面的 HOT_CITIES（与 BOSS hotCityList 对齐）。
 
 // ── 各城市的「工作区域」行政区选项（2026-10-07 用户按 BOSS 筛选栏逐城截图提供）──
 // 区域是可多选的（BOSS 筛选栏本身支持多选）。没列的城市（含全国）没有答案，
@@ -190,7 +185,8 @@ const OPT = {
 };
 
 const FILTER_SECTIONS = [
-  { key: 'businessDistrict', label: '工作区域' },
+  // 「工作区域」整块已下线（用户 2026-10-09 定）：行政区只有最后选中的城市那一份、
+  // 多城时跟着跳很乱，收窄意义也不大。只保留到「城市」这一层，不再往区县细分。
   { key: 'jobType', label: '求职类型' },
   { key: 'salary', label: '薪资待遇' },
   { key: 'experience', label: '工作经验' },
@@ -448,19 +444,16 @@ function toggleCity(c) {
   } else {
     if (i >= 0) S.cities.splice(i, 1);
     else {
-      S.cities = S.cities.filter((x) => x.code !== ALL_COUNTRY.code);   // 选具体城市就挤掉全国（互斥）
+      const specifics = S.cities.filter((x) => x.code !== ALL_COUNTRY.code);   // 选具体城市就挤掉全国（互斥）
+      if (specifics.length >= CITY_MAX) { showAlert('最多选三个城市'); return; }
+      S.cities = specifics;
       S.cities.push(c);
     }
   }
   // 一个城市都不选时（取消唯一城市后）自动点回全国（2026-10-07 用户定）
   if (!S.cities.length) S.cities = [{ ...ALL_COUNTRY }];
-  // 工作区域实时跟着目标城市换：只展最后选择的城市的区域，
-  // 清掉不属于当前展示城市的已选区名，再重画筛选区（2026-10-07 用户定）
-  const dn = currentDistrictNames();
-  S.filters.businessDistrict = (S.filters.businessDistrict || []).filter((v) => dn.includes(v));
   renderCityQuick();
   renderCityChips();
-  renderFilters();   // 工作区域实时跟随目标城市
   saveConfig();
 }
 
@@ -471,16 +464,37 @@ function currentDistrictNames() {
   return last ? (CITY_DISTRICTS[last.code] || []) : [];
 }
 
+// 城市排序对齐即投（源码 render-a.js 的 TIER1_2_CITIES）：全国置顶 → 一二线按此序 → 其余按
+// BOSS 原序接后面。整片胶囊连续平铺，不分省、不另起框；展开后同一片区限高滚动（用户 2026-10-09）。
+const TIER1_2_CITIES = ['北京', '上海', '广州', '深圳', '杭州', '成都', '武汉', '南京', '苏州', '西安',
+  '重庆', '长沙', '天津', '郑州', '东莞', '青岛', '厦门', '合肥', '佛山', '宁波', '昆明', '福州', '无锡', '济南', '大连'];
+const CITY_COLLAPSED_COUNT = 15;   // 收起态显示多少个（含全国），约 3 行
+
+function orderedCities() {
+  const rest = (typeof CITY_ALL !== 'undefined') ? [...CITY_ALL] : [];
+  const head = [{ ...ALL_COUNTRY }];
+  for (const name of TIER1_2_CITIES) {
+    const i = rest.findIndex((c) => c.label === name);
+    if (i >= 0) head.push(rest.splice(i, 1)[0]);
+  }
+  return [...head, ...rest];
+}
+
 function renderCityQuick(searchHits) {
   const box = $('city-quick');
   box.innerHTML = '';
-  const list = searchHits || (S.cityExpanded ? [...HOT_CITIES, ...MORE_CITIES] : HOT_CITIES);
+  const ordered = orderedCities();
+  // 搜索命中铺命中项；否则收起只铺热门前 N，展开铺全部（同一片连续胶囊）
+  const list = searchHits || (S.cityExpanded ? ordered : ordered.slice(0, CITY_COLLAPSED_COUNT));
   for (const c of list) {
     box.appendChild(makePill(c.label, S.cities.some((x) => x.code === c.code),
       () => toggleCity(c), { multi: true }));
   }
+  // 展开态：同一片胶囊区固定最大高度、超出滚动（不另起框、不分省）；收起/搜索态不滚动
+  box.classList.toggle('scroll', !searchHits && S.cityExpanded);
   $('btn-city-more').hidden = !!searchHits;
   $('btn-city-more').textContent = S.cityExpanded ? '收起' : '展开更多';
+  const all = $('city-all'); if (all) { all.hidden = true; all.innerHTML = ''; }   // 旧的分省滚动框已废弃
 }
 
 function renderCityChips() {
@@ -496,9 +510,10 @@ $('btn-city-more').addEventListener('click', () => {
 $('city-search').addEventListener('input', (e) => {
   const q = e.target.value.trim();
   if (!q) { renderCityQuick(); return; }
-  const pool = [...HOT_CITIES, ...MORE_CITIES, ...S.cityDict];
+  // 搜全量 BOSS 城市 + 页面抓到的字典，去重后铺命中（上限放宽到 40，全国城市多）
+  const pool = [...HOT_CITIES, ...(typeof CITY_ALL !== 'undefined' ? CITY_ALL : []), ...S.cityDict];
   const seen = new Set();
-  const hits = pool.filter((c) => c.label.includes(q) && !seen.has(c.code) && seen.add(c.code)).slice(0, 18);
+  const hits = pool.filter((c) => c.label.includes(q) && !seen.has(c.code) && seen.add(c.code)).slice(0, 40);
   renderCityQuick(hits);
 });
 
@@ -616,10 +631,16 @@ function genRefineTerms(positions) {
   return (positions || []).map((term) => ({ term, on: true }));
 }
 
+// 期望职位最多选 3 个（用户 2026-10-09 定）：和公司上限 3 对称，岗位越多每个公司页
+// 要搜的次数越多、触发限流的频次越高，限 3 把频次压下来。
+const POSITION_MAX = 3;
 function togglePosition(p) {
   const i = S.positions.indexOf(p);
-  if (i >= 0) S.positions.splice(i, 1);
-  else S.positions.push(p);
+  if (i >= 0) { S.positions.splice(i, 1); }
+  else {
+    if (S.positions.length >= POSITION_MAX) { showAlert('最多选三个期望职位'); return; }
+    S.positions.push(p);
+  }
   renderPositionResult($('position-search').value);
   renderPositionChips();
   saveConfig();
@@ -933,22 +954,21 @@ document.querySelectorAll('#search-mode .pill').forEach((p) => {
 // ════════════════════════════════════════════════════════════
 
 // ── 精投耗时预估 ──
-// 一个「公司×城市×词」是一个单元=一个分页（用户 2026-10-08 定）。单元内翻几页、
-// 每页过一次全局冷却闸 + 固定开销。总时长按单元算，供开搜前预告 + 搜索中倒推。
-// 按「全局冷却队列」模型估时：翻页是全局串行的(每次翻页前过一个随机冷却闸)，
-// 所以总翻页耗时 = 总翻页数 × 冷却均值，【不除以并行数】。第 1 页不占冷却。
-// brandId 解析是每家串行的固定开销（同一家多单元只定位一次）。翻页数用现实区间，免得吓人。
+// 一个「公司×城市」是一个单元（2026-10-09 起不含词）。单元内翻几页、每页过一次全局
+// 冷却闸 + 固定开销。总时长按单元算，供开搜前预告 + 搜索中倒推。
+// 按「全局冷却队列」模型估时：翻页全局串行(每次翻页前过一个随机冷却闸)，
+// 总翻页耗时 = 总翻页数 × 冷却均值，【不除以并行数】。第 1 页不占冷却。
+// 现在要攒「过滤后 50/家」，公司页淘汰率高、每单元翻页数上调（6~20，贴近实际）。
 const EST = {
-  perCompanyOverheadSec: 12,   // 每家 brandId 解析 + 开页搜词的固定开销
-  estPagesMin: 3,              // 预估每单元翻几页（现实区间；行为预算平分后小单元多在低位）
-  estPagesMax: 10,
+  perCompanyOverheadSec: 12,   // 每家 brandId 解析 + 开页的固定开销
+  estPagesMin: 6,
+  estPagesMax: 20,
 };
 function estimateUnits() {
   const companies = S.companies.length;
-  const words = Math.max(S.positions.length, 1);
-  // 城市数：全国/没选城市算 1 个单元维度（2026-10-08 定：分页数=公司×城市×词）
+  // 单元 = 公司 × 城市（2026-10-09 起不再乘岗位词：公司页按词翻是重复的，词只做本地过滤）
   const cities = S.cities.filter((c) => (c.name || c.label) !== '全国').length || 1;
-  return companies * cities * words;
+  return companies * cities;
 }
 function estimateRangeSec() {
   const companies = S.companies.length;
@@ -992,27 +1012,19 @@ function updateAction() {
   $('btn-action2').hidden = true;   // 不再用双按钮，时长在设置里调
 
   if (S.screen === 'config') {
-    // 广撒网必须有岗位词；锁定公司必须有公司
-    const ready = S.searchMode === 'company'
-      ? S.companies.length > 0
-      : S.positions.length > 0;
+    // 「开始搜索」一直高亮可点（用户 2026-10-09 定）：是否缺公司/岗位的校验
+    // 放到点击那一刻用弹窗提示，不再靠置灰拦人（置灰了用户不知道缺什么）。
     btn.textContent = '开始搜索';
-    btn.disabled = !ready;
+    btn.disabled = false;
     return;
   }
 
   if (S.screen === 'result') {
-    // 判定（用户 2026-10-07 定）：所选岗位的招呼语格子全部有内容 →「一键投递」；
-    // 有一个空 →「生成打招呼语」（不显示数字），只生成空的。自定义模式保持直投（AI 不介入）。
+    // 按钮始终显示已勾选总数（用户 2026-10-09 定：勾一个底部数字跟着变，封顶 75）。
+    // 判定：所选岗位招呼语格子全满 →「一键投递（N）」；有空 →「生成打招呼语（N）」只生成空的。
     const n = Math.min(S.selected.size, SEND_CAP());
-    if (S.greetMode === 'custom') {
-      btn.textContent = n ? `一键投递（${n}）` : '一键投递';
-    } else {
-      const empties = emptyGreetIds();
-      btn.textContent = empties.length
-        ? '生成打招呼语'   // 不显示数字（用户 2026-10-07 定）
-        : (n ? `一键投递（${n}）` : '一键投递');
-    }
+    const empties = S.greetMode === 'custom' ? [] : emptyGreetIds();
+    btn.textContent = empties.length ? `生成打招呼语（${n}）` : `一键投递（${n}）`;
     btn.disabled = n === 0;
     return;
   }
@@ -1057,12 +1069,13 @@ function stopSearch() {
   S.searchStopped = true;
   S.hasResult = true;                   // 保住「回结果页」入口，哪怕收到 0 个
   finalizeSearchTimer();                // 停表，显示用到停止为止的时间
-  $('search-phase').textContent = '已停止';
+  // 用户视角：点停止=这轮搜索到此为止、结果已就位，不是报错，统一写「搜索完成」（用户 2026-10-09 定）
+  $('search-phase').textContent = '搜索完成';
   $('btn-reset').textContent = '重置';
   $('btn-action').disabled = false;
   updateAction();
   loadResults().catch(() => {});        // 把已收到的岗位显示出来（可能为空，正常）
-  toast('已停止');
+  toast('搜索完成');
 }
 
 /**
@@ -1194,7 +1207,7 @@ const PHASE_TEXT = {
   greeting_error: '生成中断',
   sending: '正在投递',
   send_done: '投递完成',
-  done: '搜索完成', aborted: '已停止', error: '出错了',
+  done: '搜索完成', aborted: '搜索完成', error: '出错了',
 };
 
 const STOP_REASON = {
@@ -1207,7 +1220,28 @@ const STOP_REASON = {
   dom_fallback: '接口没返回数据，改从页面上直接读取',
 };
 
+/**
+ * 开搜前校验（用户 2026-10-09 定）：
+ *   精投（锁定公司）：必须同时选了【目标公司】和【期望职位】，缺一不可，缺哪个弹窗点名；
+ *   海投（广撒网）：必须选了【期望职位】。
+ * 返回 true=通过可以搜；返回 false=已弹窗提示，调用方直接 return。
+ */
+function validateBeforeSearch() {
+  if (S.searchMode === 'company') {
+    const noCompany = S.companies.length === 0;
+    const noPosition = S.positions.length === 0;
+    if (noCompany && noPosition) { showAlert('请选择「目标公司」和「期望职位」'); return false; }
+    if (noCompany) { showAlert('请选择「目标公司」'); return false; }
+    if (noPosition) { showAlert('请选择「期望职位」'); return false; }
+    return true;
+  }
+  // 海投
+  if (S.positions.length === 0) { showAlert('请选择「期望职位」'); return false; }
+  return true;
+}
+
 async function runSearch() {
+  if (!validateBeforeSearch()) return;   // 缺公司/岗位 → 已弹窗，不进入搜索
   S.busy = true;
   S.searchStopped = false;   // 新一轮搜索，清掉上一轮的停止标记
   S.hasResult = false;       // 新一轮，旧结果入口先撤
@@ -1231,11 +1265,8 @@ async function runSearch() {
     const byLabel = new Map(((S.dict && S.dict.industry) || []).map((o) => [o.label, o.code]));
     const industryCodes = (S.filters.industry || [])
       .map((name) => byLabel.get(name)).filter(Boolean);
-    // 工作区域存的也是名字（区名，2026-10-07 用户定区域可多选）：能按抓取字典转成
-    // 真实 code 的转 code，转不了的保留区名，布置时由 collector 按选项文字点。
-    const bdByLabel = new Map(((S.dict && S.dict.businessDistrict) || []).map((o) => [o.label, o.code]));
-    const districtVals = (S.filters.businessDistrict || []).map((v) => bdByLabel.get(v) || v);
-    const filters = { ...S.filters, industry: industryCodes, businessDistrict: districtVals };
+    const filters = { ...S.filters, industry: industryCodes };
+    delete filters.businessDistrict;   // 工作区域已下线，绝不发给后台（含存档里的旧残留）
     // HR 活跃度/福利待遇已下线（用户 2026-10-07 定）：清掉存档里可能残留的旧值，不再发给后台
     delete filters.hrActive; delete filters.welfare;
     // 精投只带布置得动的维度（用户 2026-10-08 定，界面已隐去）：剥掉海投时可能
@@ -1319,6 +1350,22 @@ function finalizeSearchTimer() {
   if (el && S.searchStartAt) el.textContent = `本次搜索用时 ${fmtClock(Date.now() - S.searchStartAt)}`;
 }
 
+// ── 投递实时计时（用户 2026-10-09 定：正在投递要有时间记录和展示）──
+// 跨「暂停→继续」累计总用时：首投记起点，继续不重置；完成/中断定格「本次投递用时 M:SS」。
+function startSendTimer() {
+  if (!S.sendStartAt) S.sendStartAt = Date.now();   // 继续投递时不重置起点
+  stopSendTimer();
+  const tick = () => { const el = $('sendbar-timer'); if (el) el.textContent = `投递用时 ${fmtClock(Date.now() - S.sendStartAt)}`; };
+  tick();
+  S.sendTimer = setInterval(tick, 1000);
+}
+function stopSendTimer() { if (S.sendTimer) { clearInterval(S.sendTimer); S.sendTimer = null; } }
+function finalizeSendTimer() {
+  stopSendTimer();
+  const el = $('sendbar-timer');
+  if (el && S.sendStartAt) el.textContent = `本次投递用时 ${fmtClock(Date.now() - S.sendStartAt)}`;
+}
+
 function renderSearchProgress(task) {
   $('search-progress').hidden = false;
   $('search-phase').textContent = PHASE_TEXT[task.phase] || task.phase;
@@ -1338,13 +1385,13 @@ function renderSearchProgress(task) {
     }
     $('search-fill').style.width = `${pct}%`;
     $('search-detail').textContent =
-      `${pct}% · 约还需 ${fmtMin(remainSec)} · 已收 ${p.collected || 0} 个`;
+      `${pct}% · 约还需 ${fmtMin(remainSec)} · 已搜 ${p.collected || 0} 个`;
   } else if (p.unitTotal && task.phase !== 'done') {
     const subFrac = Math.min(1, (p.domPage || 0) / (p.domMaxPages || CONFIG.COMPANY_PAGES_MAX || 15));
     const doneFrac = ((p.unitDone || 0) + subFrac) / p.unitTotal;
     const pct = Math.min(99, Math.max(1, Math.round(doneFrac * 100)));
     $('search-fill').style.width = `${pct}%`;
-    $('search-detail').textContent = `${pct}% · 已完成 ${p.unitDone || 0}/${p.unitTotal} · 已收 ${p.collected || 0} 个`;
+    $('search-detail').textContent = `${pct}% · 已完成 ${p.unitDone || 0}/${p.unitTotal} · 已搜 ${p.collected || 0} 个`;
   } else if (p.rounds) {
     $('search-fill').style.width = `${task.phase === 'done' ? 100 : ((p.round || 0) / p.rounds) * 100}%`;
     // 只留一行干净的进度，不提限流、不堆细节
@@ -1357,6 +1404,13 @@ function renderSearchProgress(task) {
     $('search-fill').style.width = '100%';
     // 不再显示灰色小字（数量+限流提示），漏斗里已经有完整数据
     $('search-detail').textContent = '';
+    // 精投若有公司被时间上限截断（没跑到终态、也没收到岗位）→ 不说「搜索完成」，
+    // 改中性的「搜索结束」，避免和公司清单里「未搜完」自相矛盾（用户 2026-10-09 反馈）。
+    const cs = p.companyStatus || {};
+    const cstats = p.companyStats || {};
+    const cut = S.searchMode === 'company' && S.companies.some((c) =>
+      ['locating', 'searching', 'running'].includes(cs[c.name]) && !(cstats[c.name] && cstats[c.name].count > 0));
+    if (cut) $('search-phase').textContent = '搜索结束';
     finalizeSearchTimer();   // 停表，显示本次搜索总用时
     S.searchDetailOpen = false;   // 结束后自动收起「搜索过程与结果」
     renderFunnel(task);
@@ -1405,7 +1459,9 @@ function renderCompanyStatus(task) {
     running: { t: '搜索中', c: 'run', i: '•' },
     done: { t: '已完成', c: 'ok', i: '✓' },
     miss: { t: '没定位到', c: 'bad', i: '✗' },
+    incomplete: { t: '未搜完（已到时间上限）', c: 'warn', i: '⚠' },
   };
+  const RUNNING = new Set(['locating', 'searching', 'running']);
   // 完成后：按「翻页数(工作步数)」算本轮平均，页数过少的标出来（主指标，不受冷却时间影响；
   // 用时只做显示参考，不拿来判异常）。
   const stats = (task.progress || {}).companyStats || {};
@@ -1414,9 +1470,15 @@ function renderCompanyStatus(task) {
   const pageArr = Object.values(stats).filter((x) => x && x.count > 0 && (x.pages || 0) >= 2).map((x) => x.pages || 0);
   const avgPages = pageArr.length ? pageArr.reduce((a, b) => a + b, 0) / pageArr.length : 0;
 
+  const ended = ['done', 'aborted', 'error'].includes(task.phase);
   el.innerHTML = S.companies.map((c) => {
-    const s = st[c.name];
-    const m = META[s] || { t: task.phase === 'done' ? '未搜到' : '排队中', c: 'pend', i: '◦' };
+    let s = st[c.name];
+    const statReconcile = stats[c.name];
+    // 搜索已到终态：任何还卡在「定位中/搜职位中」的公司都要收口——
+    // 否则会出现顶部「搜索完成」却有公司挂着「搜职位中」的矛盾（用户 2026-10-09 反馈）。
+    // 有收到岗位 → 当已完成；一个没收到 → 标「未搜完（已到时间上限）」。
+    if (ended && RUNNING.has(s)) s = (statReconcile && statReconcile.count > 0) ? 'done' : 'incomplete';
+    const m = META[s] || { t: ended ? '未搜到' : '排队中', c: 'pend', i: '◦' };
     let ico = m.i, cls = m.c, step = m.t;
     // 搜索中：实时显示翻了几页（工作步数）
     if (s === 'searching' && live[c.name]) step = `搜职位中 · 第 ${live[c.name]} 页`;
@@ -1428,16 +1490,8 @@ function renderCompanyStatus(task) {
       if (cnt === 0) { ico = '❗'; cls = 'bad'; step += ' · 没收到岗位，疑似异常/没登录'; }
       else if (avgPages && pages < avgPages * 0.5) { ico = '⚠'; cls = 'warn'; step += ' · 页数不足平均一半，可能异常'; }
     }
-    let html = `<div class="cs-row ${cls}"><span class="cs-ico">${ico}</span><span class="cs-name">${esc(c.name)}</span><span class="cs-step">${esc(step)}</span></div>`;
-    // 有问题的公司（异常/没定位到）：给「改网址」入口——贴公司主页网址锁定直达。
-    // 改搜索词功能已撤（2026-10-08 用户定）：失败后贴网址/进列表，不再改搜寻名。
-    const flagged = s === 'miss' || (s === 'done' && (cls === 'bad' || cls === 'warn'));
-    if (flagged) {
-      const pinned = S.brandOverrides[c.name] ? '已锁定主页 · ' : '';
-      html += `<div class="cs-sub"><span class="cs-bid">${pinned}</span>`
-        + `<button class="cs-url" data-company="${esc(c.name)}">改网址</button></div>`;
-    }
-    return html;
+    // 「改网址」功能已下线（用户 2026-10-09）：异常公司只标红提示，不再给贴网址入口。
+    return `<div class="cs-row ${cls}"><span class="cs-ico">${ico}</span><span class="cs-name">${esc(c.name)}</span><span class="cs-step">${esc(step)}</span></div>`;
   }).join('');
   updateSearchDetailSec();
 }
@@ -1460,7 +1514,19 @@ const STOP_TXT = {
 function renderFunnel(task) {
   const f = task.funnel;
   if (!f) return;
-  const rows = [`搜到 <b>${f.raw}</b> 个`];
+  // 精投：公司页是全公司岗位，拿回来已按岗位名过滤过。漏斗要让用户看清——
+  // 「扫了公司全部岗位 X 个 · 非你要的岗位 -N · 剩符合的 M」，而不是只看到干巴巴的「搜到 M」。
+  const isCo = S.searchMode === 'company';
+  const scanned = (f.raw || 0) + (f.companyPosCut || 0);
+  const rows = [(isCo && f.companyPosCut)
+    ? `扫了公司全部岗位 <b>${scanned}</b> 个`
+    : `搜到 <b>${f.raw}</b> 个`];
+  if (isCo && f.companyPosCut) {
+    rows.push(`非你要的岗位（开发/销售等） <span class="cut">-${f.companyPosCut}</span>`);
+    if (f.companyPosCutSample && f.companyPosCutSample.length) {
+      rows.push(`<span class="cut">例如：${f.companyPosCutSample.slice(0, 6).map(esc).join('、')}…</span>`);
+    }
+  }
 
   // 精投：把每家公司的「公司主页直采」诊断摊开，一眼看出卡在哪一步
   if (f.companyDiag && f.companyDiag.length) {
@@ -1517,7 +1583,7 @@ function renderFunnel(task) {
   }
   if (f.dupSent) rows.push(`之前已经聊过 <span class="cut">-${f.dupSent}</span>`);
   if (f.dupFp) rows.push(`重复挂牌 <span class="cut">-${f.dupFp}</span>`);
-  if (f.dupSent || f.dupFp || f.companyCut || f.cityCut || (f.afterPosition < f.raw)) {
+  if (f.dupSent || f.dupFp || f.companyCut || f.cityCut || (f.afterPosition < f.raw) || f.companyPosCut) {
     rows.push(`剩下 <b>${f.afterDedup ?? f.afterCompany ?? f.afterPosition ?? f.raw}</b> 个`);
   }
 
@@ -1643,9 +1709,17 @@ function buildJobCard(j) {
     </div>`;
 
   el.querySelector('input').addEventListener('change', (e) => {
-    // 选择不设上限（上限只在发送时按顺序取前 75）；单个勾选随意。
-    if (e.target.checked) S.selected.add(j.jobId);
-    else S.selected.delete(j.jobId);
+    if (e.target.checked) {
+      // 已到 75 上限，不许再勾：撤销这次勾选 + 弹窗提示（用户 2026-10-09 定）
+      if (!S.selected.has(j.jobId) && S.selected.size >= SEND_CAP()) {
+        e.target.checked = false;
+        CAP_ALERT();
+        return;
+      }
+      S.selected.add(j.jobId);
+    } else {
+      S.selected.delete(j.jobId);
+    }
     el.classList.toggle('off', !e.target.checked);
     syncGroupChecks();   // 轻量更新各公司组全选框的勾/半选状态，不整列重绘
     updateAction();
@@ -1666,11 +1740,16 @@ function buildJobCard(j) {
 
 /** 精筛后可见的岗位：岗位名含「任一点亮的子词」(或门)才留。
  *  没有子词可筛(没岗位词)→ 全给；有子词但一个都没点亮 → 0 个。 */
-// ── 单批上限：选择不设限，上限只在「生成招呼语/发送」时按显示顺序取前 SEND_CAP 个 ──
+// ── 单批上限：勾选就封顶 75（用户 2026-10-09 定：到 75 不许再勾，弹窗提示防封号）──
 const SEND_CAP = () => CONFIG.SOFT_BATCH_LIMIT || 75;
-/** 全选当前可见岗位（不封顶，封顶留到发送时）。*/
+const CAP_ALERT = () => showAlert(`为防止 boss 封号，单次投递 ${SEND_CAP()} 份。`);
+/** 全选当前可见岗位，按显示顺序取前 SEND_CAP 个封顶。*/
 function selectAllVisible() {
-  S.selected = new Set(visibleJobs().map((j) => j.jobId));
+  const ordered = [];
+  const groups = jobGroups(visibleJobs());
+  if (groups) { for (const [, arr] of groups) for (const j of arr) ordered.push(j.jobId); }
+  else ordered.push(...visibleJobs().map((j) => j.jobId));
+  S.selected = new Set(ordered.slice(0, SEND_CAP()));
 }
 
 /** 选中岗位按「界面显示顺序」(分组后的先后)排列的 jobId 列表。*/
@@ -1679,8 +1758,10 @@ function orderedSelectedIds() {
   const ordered = [];
   if (S.searchMode === 'company' && S.companies.length) {
     const groups = new Map(S.companies.map((c) => [c.name, []]));
-    for (const j of shown) { const g = groups.get(companyBucketOf(j)); if (g) g.push(j); }
+    const other = [];
+    for (const j of shown) { const g = groups.get(companyBucketOf(j)); if (g) g.push(j); else other.push(j); }
     for (const [, arr] of groups) ordered.push(...arr);
+    ordered.push(...other);   // 兜底桶里的也要能投，别漏
   } else if (S.positions.length) {
     const groups = new Map(S.positions.map((p) => [p, []]));
     for (const j of shown) { const g = groups.get(bucketOf(j)); if (g) g.push(j); }
@@ -1703,6 +1784,12 @@ function emptyGreetIds() {
 }
 
 function visibleJobs() {
+  // 精投（锁定公司）：岗位名过滤已统一放到后端 matchesAnyPosition 做
+  //（2026-10-09 修正：公司招聘页返回的是全公司岗位、不按岗位词筛，必须后端兜一道）。
+  // 所以到了前端，S.jobs 已经是过滤后的目标岗位，这里全给、按公司分组展示即可，
+  // 不再用 bucketOf 二次收窄（否则「策略产品/用户研究」这类同族岗会被误藏）。
+  // 漏斗里的「公司里的其他岗位 -N」= 后端砍掉的非目标岗，列表数与漏斗剩余数一致。
+  if (S.searchMode === 'company') return S.jobs;
   if (!S.refineTerms || !S.refineTerms.length) return S.jobs;   // 没得筛，全给
   const litPos = new Set(S.refineTerms.filter((t) => t.on).map((t) => t.term));   // 点亮的岗位桶
   if (!litPos.size) return [];   // 一个岗位都不点 = 不显示
@@ -1714,7 +1801,8 @@ function visibleJobs() {
 function renderRefineBar() {
   const sec = $('refine-sec');
   if (!sec) return;
-  sec.hidden = !(S.jobs && S.jobs.length);   // 有结果就显示
+  // 精投不再做岗位名精筛（全给，按公司分组），精筛条隐藏，避免误导用户以为能二次收窄。
+  sec.hidden = !(S.jobs && S.jobs.length) || S.searchMode === 'company';
   const box = $('refine-chips');
   box.innerHTML = '';
   const jobs = S.jobs || [];
@@ -1752,7 +1840,11 @@ function afterRefineChange() {
 function jobGroups(shown) {
   if (S.searchMode === 'company' && S.companies.length) {
     const g = new Map(S.companies.map((c) => [c.name, []]));
-    for (const j of shown) { const a = g.get(companyBucketOf(j)); if (a) a.push(j); }
+    // 公司名格式对不齐（如「腾讯科技(深圳)」vs 选的「腾讯」）时兜进「其他」，
+    // 保证可见岗位一个都不被悄悄丢掉（配合精投全给，列表数=漏斗数）。
+    const other = [];
+    for (const j of shown) { const a = g.get(companyBucketOf(j)); if (a) a.push(j); else other.push(j); }
+    if (other.length) g.set('其他', other);
     return g;
   }
   if (S.positions.length) {
@@ -1808,10 +1900,19 @@ function renderJobs() {
       });
       const box = head.querySelector('.group-check input');
       box.indeterminate = someOn && !allOn;   // 半选状态
-      // 勾选=这家公司可见岗位全选，不勾=全不选。选择不封顶，发送时才按顺序取前 75。
+      // 勾选=这家公司可见岗位全选（加到 75 封顶就停并弹窗）；不勾=全不选（用户 2026-10-09 定）。
       box.addEventListener('change', (e) => {
-        if (e.target.checked) { for (const id of ids) S.selected.add(id); }
-        else { for (const id of ids) S.selected.delete(id); }
+        if (e.target.checked) {
+          let hitCap = false;
+          for (const id of ids) {
+            if (S.selected.has(id)) continue;
+            if (S.selected.size >= SEND_CAP()) { hitCap = true; break; }
+            S.selected.add(id);
+          }
+          if (hitCap) CAP_ALERT();
+        } else {
+          for (const id of ids) S.selected.delete(id);
+        }
         renderJobs();
       });
       list.appendChild(head);
@@ -1844,29 +1945,7 @@ $('sel-all').addEventListener('change', (e) => {
 // 「搜索过程与结果」折叠/展开
 $('sd-head').addEventListener('click', () => { S.searchDetailOpen = !S.searchDetailOpen; syncSearchDetail(); });
 
-// 改网址：贴公司主页网址 → 抽出 brandId → 下次搜这家直接进这个主页（跳过定位，最稳）
-function saveBrandOverrides() { try { chrome.storage.local.set({ 'jt:brandOverrides': S.brandOverrides }); } catch (e) {} }
-$('company-status').addEventListener('click', (e) => {
-  const btn = e.target.closest('.cs-url');
-  if (!btn) return;
-  const company = btn.dataset.company;
-  const pw = window.prompt('改网址需要密码：');
-  if (pw == null) return;
-  if (pw.trim() !== '012026') { toast('密码错误，未更改', 3000); return; }
-  const v = window.prompt(`贴上「${company}」在 BOSS 的公司主页网址\n（在 BOSS 搜到这家、点进它主页，复制地址栏，形如 .../gongsi/xxxx.html；留空=取消锁定）`, '');
-  if (v == null) return;
-  const url = v.trim();
-  if (!url) { delete S.brandOverrides[company]; saveBrandOverrides(); toast(`已取消「${company}」的主页锁定，恢复自动定位`, 3500); }
-  else {
-    const m = url.match(/gongsi\/(?:job\/)?([^.?\/]+)\.html/);
-    if (!m) { toast('网址里没找到 /gongsi/xxx.html，没改', 4000); return; }
-    S.brandOverrides[company] = m[1];
-    saveBrandOverrides();
-    toast(`已锁定「${company}」的主页，下次搜这家直接进它、跳过定位`, 3800);
-  }
-  const sub = btn.closest('.cs-sub'); const span = sub && sub.querySelector('.cs-bid');
-  if (span) span.textContent = S.brandOverrides[company] ? '已锁定主页 · ' : '';
-});
+// 「改网址」功能已下线（用户 2026-10-09）：相关的贴网址锁定主页逻辑整体移除。
 
 // 招呼语模式：AI 定制 / 自定义
 $('greet-mode').addEventListener('click', (e) => {
@@ -2100,10 +2179,12 @@ async function runSend() {
   S.sentJobIds = new Set();          // 本轮已处理过的岗位（跨暂停/继续累计）
   S.sendBatch = batchIds();          // 本批：按显示顺序取前 75（单批上限）
   S.sendTotal = S.sendBatch.length;  // 这批总数，底部计数用
+  S.sendStartAt = 0;                 // 新一轮投递，清掉上一轮起点
   if (S.screen !== 'result') showScreen('result');
   $('send-banner').hidden = false;
   $('sendbar-fill').style.width = '0%';
   $('sendbar-phase').textContent = '正在启动投递...';
+  startSendTimer();                  // 开表：实时显示投递用时
   enterSendingBar();
   await fireSend(S.sendBatch);
 }
@@ -2157,6 +2238,7 @@ async function resumeSending() {
   S.busy = true; S.sending = true;
   $('send-banner').hidden = false;
   $('sendbar-phase').textContent = '正在继续投递...';
+  startSendTimer();                  // 继续计时（起点不变，累计总用时）
   enterSendingBar();
   await fireSend(remaining);
 }
@@ -2184,6 +2266,7 @@ function renderSendProgress(task) {
 
     // 是暂停而非完成：停在原地，按钮变「继续发送」，不切结果屏
     if (S.sendPaused) {
+      stopSendTimer();   // 暂停停表（起点保留，继续时接着累计）
       const doneN = S.sentJobIds.size;
       $('sendbar-phase').textContent = `已暂停（已处理 ${doneN}/${S.sendTotal}），点「继续发送」接着投`;
       enterSendingBar();   // 按钮此时显示「继续发送」
@@ -2192,6 +2275,7 @@ function renderSendProgress(task) {
 
     // 真正完成：切到投递结果屏，展示明细
     S.sending = false;
+    finalizeSendTimer();   // 定格「本次投递用时 M:SS」
     $('send-banner').hidden = true;
     exitSendingBar();
     showScreen('send');
@@ -2219,8 +2303,10 @@ function renderSendProgress(task) {
       $('send-log').appendChild(line);
     }
     $('send-phase').textContent = '投递完成';
+    const usedTxt = S.sendStartAt ? `　用时 ${fmtClock(Date.now() - S.sendStartAt)}` : '';
     $('send-detail').textContent =
       `成功 ${ok} 个，跳过 ${skip} 个，失败 ${failed.length} 个`
+      + usedTxt
       + (st.todayTotal != null ? `　今天累计投了 ${st.todayTotal} 个` : '');
 
     // 重投：只把失败的挑出来，一键重发。成功和跳过的不再动。
@@ -2316,6 +2402,7 @@ chrome.runtime.onMessage.addListener((msg) => {
         S.busy = false;
         if (t.phase === 'send_error') {
           S.sending = false; S.sendPaused = false;
+          finalizeSendTimer();
           $('send-banner').hidden = true; exitSendingBar();
           toast(t.error || '投递中断', 6000);
         }
@@ -2361,7 +2448,7 @@ chrome.runtime.onMessage.addListener((msg) => {
   // HR 活跃度和工作性质之前是预设好的，现在交还给用户自己点：
   // 预设值会让人以为「我什么都没选」，实际上池子已经被悄悄收窄了。
 
-  const st = await chrome.storage.local.get([STORE.UI.FILTER_STATE, 'jt:brandOverrides']);   // jt:searchOverrides 已随改搜索词功能撤除（2026-10-08），旧键残留无害不再读
+  const st = await chrome.storage.local.get([STORE.UI.FILTER_STATE]);   // jt:brandOverrides（改网址）/ jt:searchOverrides 均已下线，不再读
   const saved = st[STORE.UI.FILTER_STATE];
   if (saved) {
     S.searchMode = saved.searchMode || 'position';
@@ -2372,20 +2459,21 @@ chrome.runtime.onMessage.addListener((msg) => {
   }
   // 城市码自愈（2026-10-06 修过 苏州/无锡/合肥/东莞 四个错码）：历史存档里的选中项
   // 可能还带着错码，按 label 对齐内置表纠正一次，免得旧错码继续被发给后台。
-  const CODE_BY_LABEL = Object.fromEntries([...HOT_CITIES, ...MORE_CITIES].map((c) => [c.label, c.code]));
+  const CODE_BY_LABEL = Object.fromEntries(
+    [...HOT_CITIES, ...(typeof CITY_ALL !== 'undefined' ? CITY_ALL : [])].map((c) => [c.label, c.code]));
   S.cities = S.cities.map((c) => (CODE_BY_LABEL[c.label] && CODE_BY_LABEL[c.label] !== c.code)
     ? { ...c, code: CODE_BY_LABEL[c.label] } : c);
-  // 城市规则对齐（2026-10-07 用户定）：全国与具体城市互斥；一个都不选时自动补全国；
-  // 工作区域只展最后选择的城市，清掉存档里不属于当前展示城市的已选区名
+  // 城市规则对齐（2026-10-07 用户定）：全国与具体城市互斥；一个都不选时自动补全国
   if (S.cities.some((c) => c.code !== ALL_COUNTRY.code)) {
     S.cities = S.cities.filter((c) => c.code !== ALL_COUNTRY.code);
   }
   if (!S.cities.length) S.cities = [{ ...ALL_COUNTRY }];
-  {
-    const dn = currentDistrictNames();
-    S.filters.businessDistrict = (S.filters.businessDistrict || []).filter((v) => dn.includes(v));
-  }
-  S.brandOverrides = st['jt:brandOverrides'] || {};
+  // 三项上限统一为 3（用户 2026-10-09）：存档里超出的（旧版无限制时存的）启动时截掉
+  S.companies = S.companies.slice(0, COMPANY_MAX);
+  S.positions = S.positions.slice(0, POSITION_MAX);
+  if (!S.cities.some((c) => c.code === ALL_COUNTRY.code)) S.cities = S.cities.slice(0, CITY_MAX);
+  delete S.filters.businessDistrict;   // 工作区域已下线：清掉存档里的旧残留
+  S.brandOverrides = {};   // 「改网址」已下线，不再从存储读锁定；始终空=一律自动定位
   // 搜索时长固定，不再从存储读用户值
 
   renderUploads();

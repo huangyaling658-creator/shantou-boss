@@ -666,6 +666,8 @@ const Collector = {
         salaryDesc: pickSalary(c),
         brandName: pick(c, ['.company-name', '[class*="company-name"]', '.company-info .name']),
         cityName: pick(c, ['.job-area', '.job-area-wrapper', '[class*="job-area"]', '[class*="city"]']),
+        // HR 名（公司页卡片结构实测：.boss-name = 「刘皓·高级产品经理」）。用于去重 C 方案的指纹。
+        bossName: pick(c, ['.boss-name', '[class*="boss-name"]']),
         jobExperience: tags.exp,
         jobDegree: tags.deg,
       }));

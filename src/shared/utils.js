@@ -86,6 +86,9 @@ const U = {
       U.normalizeJobName(job.jobName),
       job.city || '',
       U.salaryBucket(job.salaryMin, job.salaryMax),
+      // C 方案（用户 2026-10-09）：加上 HR。同岗不同 HR = 不同的坑，都投；
+      // 只有「同岗 + 同 HR」才判为同一条重复挂牌。HR 用 hrId，拿不到就用 HR 名兜底。
+      job.hrId || job.hrName || '',
     ].join('|'));
   },
 
